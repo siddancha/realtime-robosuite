@@ -17,6 +17,7 @@ import mujoco
 import numpy as np
 
 import robosuite as suite
+from robosuite.environments.base import MujocoEnv
 from robosuite.controllers import load_composite_controller_config
 from robosuite.controllers.composite.composite_controller import WholeBody
 from robosuite.utils.log_utils import ROBOSUITE_DEFAULT_LOGGER
@@ -111,7 +112,7 @@ if __name__ == "__main__":
         args.config = None
 
     # Create environment
-    env = suite.make(
+    env: MujocoEnv = suite.make(
         **config,
         has_renderer=True,
         has_offscreen_renderer=False,
