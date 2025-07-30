@@ -15,6 +15,7 @@ dependencies = [
     "gymnasium>=1.1.1",
     "h5py>=3.14.0",
     "hidapi>=0.14.0.post4",
+    "imageio[ffmpeg]>=2.37.0",
     "importlib-resources==6.5.2",
     "iniconfig==2.1.0",
     "ipython>=8.37.0",
