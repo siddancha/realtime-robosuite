@@ -20,7 +20,7 @@ def register_env(target_class):
     REGISTERED_ENVS[target_class.__name__] = target_class
 
 
-def make(env_name, *args, **kwargs):
+def make(env_name, *args, **kwargs) -> 'MujocoEnv':
     """
     Instantiates a robosuite environment.
     This method attempts to mirror the equivalent functionality of gym.make in a somewhat sloppy way.
