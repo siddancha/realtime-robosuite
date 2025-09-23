@@ -25,11 +25,12 @@ class MjviewerRenderer:
 
     def update(self):
         if self.viewer is None:
+            # Changed by Sid -- show left and right UI by default
             self.viewer = viewer.launch_passive(
                 self.env.sim.model._model,
                 self.env.sim.data._data,
-                show_left_ui=False,
-                show_right_ui=False,
+                show_left_ui=True,
+                show_right_ui=True,
             )
 
             self.viewer.opt.geomgroup[0] = 0
