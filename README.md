@@ -1,4 +1,5 @@
-# robosuite
+<h1 align="center">Realtime Robosuite</h1>
+<h3 align="center">Realtime simulation benchmarking via asynchronous <br>policy execution</i></h3>
 
 ![gallery of_environments](docs/images/gallery.png)
 
