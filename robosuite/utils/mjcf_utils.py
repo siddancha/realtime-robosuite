@@ -467,7 +467,7 @@ def new_inertial(pos=(0, 0, 0), mass=None, **kwargs):
     return new_element(tag="inertial", name=None, **kwargs)
 
 
-def get_size(size, size_max, size_min, default_max, default_min):
+def get_size(size, size_max, size_min, default_max, default_min, rng=None):
     """
     Helper method for providing a size, or a range to randomize from
 
@@ -477,6 +477,7 @@ def get_size(size, size_max, size_min, default_max, default_min):
         size_min (n-array): Array of numbers that define the custom min size from which to randomly sample
         default_max (n-array): Array of numbers that define the default max size from which to randomly sample
         default_min (n-array): Array of numbers that define the default min size from which to randomly sample
+        rng (None or np.random.RandomState): Random number generator to use. If None, will use np.random.default_rng()
 
     Returns:
         np.array: size generated
@@ -484,6 +485,8 @@ def get_size(size, size_max, size_min, default_max, default_min):
     Raises:
         ValueError: [Inconsistent array sizes]
     """
+    if rng is None:
+        rng = np.random.default_rng()
     if len(default_max) != len(default_min):
         raise ValueError(
             "default_max = {} and default_min = {}".format(str(default_max), str(default_min))
@@ -497,7 +500,7 @@ def get_size(size, size_max, size_min, default_max, default_min):
             size_max = default_max
         if size_min is None:
             size_min = default_min
-        size = np.array([np.random.uniform(size_min[i], size_max[i]) for i in range(len(default_max))])
+        size = np.array([rng.uniform(size_min[i], size_max[i]) for i in range(len(default_max))])
     return np.array(size)
 
 
@@ -1060,7 +1063,7 @@ def scale_site_element(element, scale_array):
         element.set("size", s_size)
 
 
-def scale_mjcf_model(obj, asset_root, worldbody, scale, get_elements_func, scale_slide_joints=True):
+def scale_mjcf_model(obj, asset_root, scale, get_elements_func, worldbody=None, scale_slide_joints=True):
     """
     Scales all elements (geoms, meshes, bodies, joints, sites) in an MJCF model.
 
@@ -1098,9 +1101,10 @@ def scale_mjcf_model(obj, asset_root, worldbody, scale, get_elements_func, scale
         scale_joint_element(elem, scale_array, scale_slide_joints)
 
     # Scale sites
-    site_pairs = get_elements_func(worldbody, "site")
-    for (_, elem) in site_pairs:
-        scale_site_element(elem, scale_array)
+    if worldbody is not None:
+        site_pairs = get_elements_func(worldbody, "site")
+        for (_, elem) in site_pairs:
+            scale_site_element(elem, scale_array)
 
     return scale_array
 
