@@ -52,7 +52,6 @@ def _simulation_worker(
     env_factory: Callable[[], "MujocoEnv"],
     action_freq: float,
     observation_freq: float,
-    auto_reset: bool,
     stop_event,
     started_event,
     action_queue,
@@ -69,6 +68,7 @@ def _simulation_worker(
     default_action = _default_action_from_env(env)
     latest_action = default_action.copy()
     current_step: Optional[StepResult] = None
+    episode_done = False
 
     def reset_env():
         nonlocal latest_action, current_step
@@ -113,6 +113,7 @@ def _simulation_worker(
                 break
             if cmd == "reset":
                 reset_env()
+                episode_done = False
                 next_action_time = time.perf_counter()
                 next_observation_time = next_action_time
             elif cmd == "shutdown":
@@ -120,6 +121,10 @@ def _simulation_worker(
                 break
         if stop_event.is_set():
             break
+
+        if episode_done:
+            stop_event.wait(timeout=0.01)
+            continue
 
         now = time.perf_counter()
         sleep_time = next_action_time - now
@@ -152,12 +157,9 @@ def _simulation_worker(
             next_action_time = now + action_period
 
         if done:
-            if not auto_reset:
-                stop_event.set()
-                if not should_publish:
-                    _publish_step(observation_queue, current_step)
-                break
-            reset_env()
+            episode_done = True
+            if not should_publish:
+                _publish_step(observation_queue, current_step)
             next_action_time = time.perf_counter()
             next_observation_time = next_action_time
 
@@ -264,7 +266,6 @@ class AsyncSimulation:
         action_freq: float = 50.0,
         observation_freq: float = 30.0,
         history: int = 1,
-        auto_reset: bool = True,
         ctx: Optional[BaseContext] = None,
     ):
         if action_freq <= 0:
@@ -275,8 +276,6 @@ class AsyncSimulation:
         self.env_factory = env_factory
         self.action_freq = float(action_freq)
         self.observation_freq = float(observation_freq)
-        self.auto_reset = auto_reset
-
         self._ctx = ctx or mp.get_context("spawn")
         self._stop_event = self._ctx.Event()
         self._started_event = self._ctx.Event()
@@ -303,7 +302,6 @@ class AsyncSimulation:
                 self.env_factory,
                 self.action_freq,
                 self.observation_freq,
-                self.auto_reset,
                 self._stop_event,
                 self._started_event,
                 self._action_queue,

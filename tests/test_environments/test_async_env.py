@@ -43,8 +43,8 @@ def test_async_simulation_runs_and_uses_latest_action():
         sim.stop()
 
 
-def test_async_simulation_stops_when_episode_done_without_auto_reset():
-    sim = AsyncSimulation(make_manipulation_env, action_freq=15.0, observation_freq=15.0, auto_reset=False)
+def test_async_simulation_stops_when_episode_done():
+    sim = AsyncSimulation(make_manipulation_env, action_freq=15.0, observation_freq=15.0)
     try:
         sim.start()
         deadline = time.time() + 2.0
