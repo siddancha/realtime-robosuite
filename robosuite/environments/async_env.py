@@ -46,13 +46,7 @@ class Response:
     error: Optional[str] = None
 
 
-def _default_action_from_env(env) -> np.ndarray:
-    low, _ = env.action_spec
-    low = np.asarray(low, dtype=np.float32)
-    return np.zeros_like(low, dtype=np.float32)
-
-
-def _publish_step(queue_obj: "Queue", step: StepResult):
+def _publish_observation(queue_obj: "Queue", step: StepResult):
     while True:
         try:
             queue_obj.put_nowait(step)
@@ -82,7 +76,7 @@ def _simulation_worker(
     except Exception as exc:
         logger.debug("initialize_time failed with %s. Continuing with env defaults.", exc)
 
-    default_action = _default_action_from_env(env)
+    default_action = np.zeros_like(env.action_spec[0], dtype=np.float32)
     latest_action = default_action.copy()
     current_step: Optional[StepResult] = None
     episode_done = False
@@ -103,7 +97,7 @@ def _simulation_worker(
             action=latest_action.copy(),
             timestamp=time.time(),
         )
-        _publish_step(observation_queue, current_step)
+        _publish_observation(observation_queue, current_step)
 
     def drain_actions():
         nonlocal latest_action
@@ -175,7 +169,7 @@ def _simulation_worker(
         now = time.perf_counter()
         should_publish = now >= next_observation_time or done
         if should_publish:
-            _publish_step(observation_queue, current_step)
+            _publish_observation(observation_queue, current_step)
             while next_observation_time <= now:
                 next_observation_time += observation_period
 
@@ -186,7 +180,7 @@ def _simulation_worker(
         if done:
             episode_done = True
             if not should_publish:
-                _publish_step(observation_queue, current_step)
+                _publish_observation(observation_queue, current_step)
             next_action_time = time.perf_counter()
             next_observation_time = next_action_time
 
