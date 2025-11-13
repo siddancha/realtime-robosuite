@@ -23,6 +23,7 @@ from robosuite.controllers import (
 from robosuite.robots import ALL_ROBOTS
 from robosuite.models.grippers import ALL_GRIPPERS
 from robosuite.utils.log_utils import ROBOSUITE_DEFAULT_LOGGER
+from robosuite.utils.async_env import AsyncSimulation, ObservationStream, ActionStream, StepResult
 
 try:
     import robosuite_models
