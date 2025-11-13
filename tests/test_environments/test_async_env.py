@@ -79,5 +79,3 @@ def test_async_simulation_stops_when_episode_done():
         assert sim.latest_step() is not None
     finally:
         sim.stop()
-
-
