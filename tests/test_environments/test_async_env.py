@@ -3,24 +3,22 @@ import time
 import numpy as np
 
 import robosuite as suite
-from robosuite.utils.async_env import AsyncSimulation, StepResult
+from robosuite import StepResult
 
-
-def make_manipulation_env():
-    return suite.make(
-        env_name="Lift",
-        robots="Panda",
-        has_renderer=False,
-        has_offscreen_renderer=False,
-        use_camera_obs=False,
-    )
 
 def test_async_simulation_runs_and_uses_latest_action():
-    template_env = make_manipulation_env()
-    action_dim = template_env.action_dim
-    template_env.close()
+    sim = suite.make_async(
+        env_name="Lift",
+        robots="Panda",
+        has_renderer=True,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        action_freq=20.0,
+        observation_freq=10.0,
+    )
+    # action_dim = template_env.action_dim
+    action_dim = 7
 
-    sim = AsyncSimulation(make_manipulation_env, action_freq=20.0, observation_freq=10.0)
     try:
         sim.start()
         initial_step = sim.observation_stream.get(timeout=1.0)
@@ -44,7 +42,15 @@ def test_async_simulation_runs_and_uses_latest_action():
 
 
 def test_async_simulation_stops_when_episode_done():
-    sim = AsyncSimulation(make_manipulation_env, action_freq=15.0, observation_freq=15.0)
+    sim = suite.make_async(
+        env_name="Lift",
+        robots="Panda",
+        has_renderer=True,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        action_freq=15.0,
+        observation_freq=15.0,
+    )
     try:
         sim.start()
         deadline = time.time() + 2.0

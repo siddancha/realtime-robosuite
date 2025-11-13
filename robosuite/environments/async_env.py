@@ -5,10 +5,12 @@ import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from functools import partial
 from multiprocessing.context import BaseContext
 from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
+import robosuite as suite
 
 if TYPE_CHECKING:
     from robosuite.environments.base import MujocoEnv
@@ -363,3 +365,29 @@ class AsyncSimulation:
         self.stop(wait=True)
 
 
+def make_async(
+    env_name: str,
+    *args,
+    action_freq: float = 50.0,
+    observation_freq: float = 30.0,
+    history: int = 1,
+    **kwargs,
+) -> AsyncSimulation:
+    """
+    Instantiates an asynchronous simluation of a robosuite environment.
+    Args:
+        env_name (str): Name of the robosuite environment to initialize
+        *args: Additional arguments to pass to the specific environment class initializer
+        action_freq (float): The frequency of the action stream in Hz.
+        observation_freq (float): The frequency of the observation stream in Hz.
+        history (int): The number of steps to store in the observation stream.
+        **kwargs: Additional arguments to pass to the specific environment class initializer
+    Returns:
+        AsyncSimulation: Asynchronous simulation of the robosuite environment.
+    """
+    return AsyncSimulation(
+        env_factory = partial["MujocoEnv"](suite.make, env_name, *args, **kwargs),
+        action_freq = action_freq,
+        observation_freq = observation_freq,
+        history = history,
+    )
