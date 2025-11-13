@@ -12,7 +12,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from robosuite.environments.base import MujocoEnv
-    from multiprocessing import Queue
+    from multiprocessing.queues import Queue
+    from multiprocessing.synchronize import Event
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +54,11 @@ def _simulation_worker(
     env_factory: Callable[[], "MujocoEnv"],
     action_freq: float,
     observation_freq: float,
-    stop_event,
-    started_event,
-    action_queue,
-    observation_queue,
-    command_queue,
+    stop_event: "Event",
+    started_event: "Event",
+    action_queue: "Queue",
+    observation_queue: "Queue",
+    command_queue: "Queue",
 ):
     env = env_factory()
 
@@ -203,9 +204,17 @@ class ObservationStream:
             return self._history[-1] if self._history else None
 
     def latest(self) -> Optional[StepResult]:
+        """
+        Returns the latest step without blocking.
+        If the queue is empty, returns None.
+        """
         return self._drain(block=False, timeout=None)
 
     def get(self, timeout: Optional[float] = None) -> StepResult:
+        """
+        Returns the latest step with blocking.
+        If the queue is empty, waits for the step to be available.
+        """
         result = self._drain(block=True, timeout=timeout)
         if result is None:
             raise TimeoutError("Timed out while waiting for observation.")
@@ -229,13 +238,13 @@ class ActionStream:
         self._latest_timestamp: float = 0.0
 
     def push(self, action: Sequence[float]):
-        array = np.asarray(action, dtype=np.float32).copy()
+        action_array = np.asarray(action, dtype=np.float32).copy()
         with self._lock:
-            self._latest = array
+            self._latest = action_array
             self._latest_timestamp = time.time()
         while True:
             try:
-                self._queue.put_nowait(array)
+                self._queue.put_nowait(action_array)
                 break
             except queue.Full:
                 try:
