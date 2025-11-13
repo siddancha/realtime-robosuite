@@ -25,7 +25,6 @@ class StepResult:
     """
     Container for data produced by a single control step of the simulation.
     """
-
     observation: OrderedDict[str, np.ndarray]
     reward: float
     done: bool
