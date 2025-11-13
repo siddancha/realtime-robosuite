@@ -12,6 +12,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from robosuite.environments.base import MujocoEnv
+    from multiprocessing import Queue
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def _default_action_from_env(env) -> np.ndarray:
     return np.zeros_like(low, dtype=np.float32)
 
 
-def _publish_step(queue_obj, step: StepResult):
+def _publish_step(queue_obj: "Queue", step: StepResult):
     while True:
         try:
             queue_obj.put_nowait(step)
@@ -174,7 +175,7 @@ class ObservationStream:
     Interface for consuming observations produced by the asynchronous simulation process.
     """
 
-    def __init__(self, queue_obj, history: int = 1):
+    def __init__(self, queue_obj: "Queue", history: int = 1):
         if history <= 0:
             raise ValueError("ObservationStream history must be a positive integer.")
         self._queue = queue_obj
@@ -221,7 +222,7 @@ class ActionStream:
     Interface for pushing actions to the asynchronous simulation process.
     """
 
-    def __init__(self, queue_obj):
+    def __init__(self, queue_obj: "Queue"):
         self._queue = queue_obj
         self._lock = threading.Lock()
         self._latest: Optional[np.ndarray] = None
