@@ -1,6 +1,7 @@
 import time
 
 import numpy as np
+import pytest
 
 import robosuite as suite
 from robosuite import StepResult
@@ -10,21 +11,21 @@ def test_async_simulation_runs_and_uses_latest_action():
     sim = suite.make_async(
         env_name="Lift",
         robots="Panda",
-        has_renderer=True,
+        has_renderer=False,
         has_offscreen_renderer=False,
         use_camera_obs=False,
         action_freq=20.0,
         observation_freq=10.0,
     )
-    # action_dim = template_env.action_dim
-    action_dim = 7
 
     try:
         sim.start()
+        retrieved_action_dim = sim.action_dim
+        assert retrieved_action_dim == 7  # Panda has 7 DoF
         initial_step = sim.observation_stream.get(timeout=1.0)
         assert isinstance(initial_step, StepResult)
 
-        new_action = np.zeros(action_dim, dtype=np.float32)
+        new_action = np.zeros(retrieved_action_dim, dtype=np.float32)
         new_action[:2] = np.array([0.75, -0.25], dtype=np.float32)
         sim.action_stream.push(new_action)
 
@@ -41,11 +42,27 @@ def test_async_simulation_runs_and_uses_latest_action():
         sim.stop()
 
 
+def test_async_simulation_action_dim_without_start():
+    sim = suite.make_async(
+        env_name="Lift",
+        robots="Panda",
+        has_renderer=False,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        action_freq=10.0,
+        observation_freq=10.0,
+    )
+    try:
+        with pytest.raises(RuntimeError):
+            _ = sim.action_dim
+    finally:
+        sim.stop()
+
 def test_async_simulation_stops_when_episode_done():
     sim = suite.make_async(
         env_name="Lift",
         robots="Panda",
-        has_renderer=True,
+        has_renderer=False,
         has_offscreen_renderer=False,
         use_camera_obs=False,
         action_freq=15.0,

@@ -5,7 +5,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
-from functools import partial
+from functools import cached_property, partial
 from multiprocessing.context import BaseContext
 from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
 
@@ -34,6 +34,19 @@ class StepResult:
     timestamp: float
 
 
+@dataclass(frozen=True)
+class Request:
+    command: str
+    payload: Any = None
+
+
+@dataclass(frozen=True)
+class Response:
+    command: str
+    payload: Any = None
+    error: Optional[str] = None
+
+
 def _default_action_from_env(env) -> np.ndarray:
     low, _ = env.action_spec
     low = np.asarray(low, dtype=np.float32)
@@ -60,7 +73,8 @@ def _simulation_worker(
     started_event: "Event",
     action_queue: "Queue",
     observation_queue: "Queue",
-    command_queue: "Queue",
+    request_queue: "Queue",
+    reply_queue: "Queue",
 ):
     env = env_factory()
 
@@ -112,17 +126,27 @@ def _simulation_worker(
     while not stop_event.is_set():
         while True:
             try:
-                cmd = command_queue.get_nowait()
+                request: Request = request_queue.get_nowait()
             except queue.Empty:
                 break
-            if cmd == "reset":
+
+            assert isinstance(request, Request), f"Expected Request, got {type(request)}"
+            command = request.command
+
+            if command == "reset":
                 reset_env()
                 episode_done = False
                 next_action_time = time.perf_counter()
                 next_observation_time = next_action_time
-            elif cmd == "shutdown":
+                reply_queue.put(Response(command=command, payload=None))
+            elif command == "shutdown":
                 stop_event.set()
+                reply_queue.put(Response(command=command, payload=None))
                 break
+            elif command == "get_action_dim":
+                reply_queue.put(Response(command=command, payload=env.action_dim))
+            else:
+                raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
         if stop_event.is_set():
             break
 
@@ -293,7 +317,8 @@ class AsyncSimulation:
         self._started_event = self._ctx.Event()
         self._action_queue = self._ctx.Queue(maxsize=8)
         self._observation_queue = self._ctx.Queue(maxsize=max(1, history))
-        self._command_queue = self._ctx.Queue()
+        self._request_queue = self._ctx.Queue(maxsize=1)
+        self._reply_queue = self._ctx.Queue(maxsize=1)
         self._process: Optional[mp.Process] = None
 
         self.action_stream = ActionStream(self._action_queue)
@@ -318,7 +343,8 @@ class AsyncSimulation:
                 self._started_event,
                 self._action_queue,
                 self._observation_queue,
-                self._command_queue,
+                self._request_queue,
+                self._reply_queue,
             ),
         )
         self._process.start()
@@ -332,12 +358,13 @@ class AsyncSimulation:
     def stop(self, wait: bool = True):
         if self._process is None:
             return
+        if self.is_running():
+            try:
+                self._send_request("shutdown", timeout=2.0)
+            except Exception:
+                pass
         if not self._stop_event.is_set():
             self._stop_event.set()
-        try:
-            self._command_queue.put_nowait("shutdown")
-        except queue.Full:
-            pass
         if wait and self._process.is_alive():
             self._process.join(timeout=10.0)
         if self._process.is_alive():
@@ -349,7 +376,47 @@ class AsyncSimulation:
     def reset(self):
         if not self.is_running():
             raise RuntimeError("AsyncSimulation is not running.")
-        self._command_queue.put("reset")
+        self._send_request("reset", timeout=2.0)
+
+    def _send_request(
+        self,
+        command: str,
+        payload: Any = None,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        if not self.is_running():
+            raise RuntimeError(f"AsyncSimulation is not running; cannot send {command!r} command.")
+
+        request = Request(command=command, payload=payload)
+        self._request_queue.put(request)
+        try:
+            response = self._reply_queue.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise RuntimeError(f"Timed out waiting for response to command {command!r}.") from exc
+
+        if not isinstance(response, Response):
+            raise RuntimeError(
+                f"Received unknown message type from asynchronous simulation: {response!r}"
+            )
+
+        if response.command != command:
+            raise RuntimeError(
+                f"Received mismatched response '{response.command}' for command '{command}'."
+            )
+
+        if response.error is not None:
+            raise RuntimeError(
+                f"Command '{command}' failed in asynchronous simulation: {response.error}"
+            )
+
+        return response.payload
+
+    @cached_property
+    def action_dim(self) -> int:
+        if not self.is_running():
+            raise RuntimeError("AsyncSimulation must be running to query action_dim.")
+        result = self._send_request("get_action_dim", timeout=2.0)
+        return int(result)
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.is_alive()
