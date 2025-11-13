@@ -1,4 +1,5 @@
 from robosuite.environments.base import make
+from robosuite.environments.async_env import make_async
 
 # Manipulation environments
 from robosuite.environments.manipulation.lift import Lift
@@ -14,6 +15,7 @@ from robosuite.environments.manipulation.two_arm_handover import TwoArmHandover
 from robosuite.environments.manipulation.two_arm_transport import TwoArmTransport
 
 from robosuite.environments import ALL_ENVIRONMENTS
+from robosuite.environments.async_env import AsyncSimulation, ObservationStream, ActionStream, StepResult
 from robosuite.controllers import (
     ALL_PART_CONTROLLERS,
     load_part_controller_config,
