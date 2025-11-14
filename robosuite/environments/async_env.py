@@ -49,11 +49,11 @@ class Response:
 
 def _simulation_worker(
     env_factory: Callable[[], MujocoEnv],
-    action_freq: float,
+    control_freq: float,
     observation_freq: float,
     stop_event: Event,
     started_event: Event,
-    action_queue: Queue,
+    control_queue: Queue,
     observation_queue: Queue,
     request_queue: Queue,
     reply_queue: Queue,
@@ -79,7 +79,7 @@ def _simulation_worker(
 
     def reset_env():
         nonlocal latest_action, current_step
-        env.initialize_time(action_freq)
+        env.initialize_time(control_freq)
         observation = env.reset()
         latest_action = default_action.copy()
         current_step = StepResult(
@@ -96,18 +96,18 @@ def _simulation_worker(
         nonlocal latest_action
         while True:
             try:
-                candidate = action_queue.get_nowait()
-                latest_action = np.asarray(candidate, dtype=np.float32).copy()
+                latest_action = control_queue.get_nowait()
+                latest_action = np.asarray(latest_action, dtype=np.float32).copy()
             except queue.Empty:
                 break
 
     reset_env()
     started_event.set()
 
-    action_period = 1.0 / action_freq
+    control_period = 1.0 / control_freq
     observation_period = 1.0 / observation_freq
-    next_action_time = time.perf_counter()
-    next_observation_time = next_action_time
+    next_control_time = time.perf_counter()
+    next_observation_time = next_control_time
 
     while not stop_event.is_set():
         while True:
@@ -122,8 +122,8 @@ def _simulation_worker(
             if command == "reset":
                 reset_env()
                 episode_done = False
-                next_action_time = time.perf_counter()
-                next_observation_time = next_action_time
+                next_control_time = time.perf_counter()
+                next_observation_time = next_control_time
                 reply_queue.put(Response(command=command, payload=None))
             elif command == "shutdown":
                 stop_event.set()
@@ -141,7 +141,7 @@ def _simulation_worker(
             continue
 
         now = time.perf_counter()
-        sleep_time = next_action_time - now
+        sleep_time = next_control_time - now
         if sleep_time > 0:
             if stop_event.wait(timeout=min(sleep_time, 0.002)):
                 break
@@ -166,16 +166,16 @@ def _simulation_worker(
             while next_observation_time <= now:
                 next_observation_time += observation_period
 
-        next_action_time += action_period
-        if next_action_time <= now:
-            next_action_time = now + action_period
+        next_control_time += control_period
+        if next_control_time <= now:
+            next_control_time = now + control_period
 
         if done:
             episode_done = True
             if not should_publish:
                 publish_observation(current_step)
-            next_action_time = time.perf_counter()
-            next_observation_time = next_action_time
+            next_control_time = time.perf_counter()
+            next_observation_time = next_control_time
 
     try:
         env.close()
@@ -238,9 +238,9 @@ class ObservationStream:
             return tuple(self._history)
 
 
-class ActionStream:
+class ControlStream:
     """
-    Interface for pushing actions to the asynchronous simulation process.
+    Interface for pushing actions (controls) to the asynchronous simulation process.
     """
 
     def __init__(self, queue_obj: Queue):
@@ -285,29 +285,29 @@ class AsyncSimulation:
     def __init__(
         self,
         env_factory: Callable[[], MujocoEnv],
-        action_freq: float = 50.0,
+        control_freq: float = 50.0,
         observation_freq: float = 30.0,
         history: int = 1,
         ctx: Optional[BaseContext] = None,
     ):
-        if action_freq <= 0:
-            raise ValueError("action_freq must be > 0.")
+        if control_freq <= 0:
+            raise ValueError("control_freq must be > 0.")
         if observation_freq <= 0:
             raise ValueError("observation_freq must be > 0.")
 
         self.env_factory = env_factory
-        self.action_freq = float(action_freq)
+        self.control_freq = float(control_freq)
         self.observation_freq = float(observation_freq)
         self._ctx = ctx or mp.get_context("spawn")
         self._stop_event = self._ctx.Event()
         self._started_event = self._ctx.Event()
-        self._action_queue = self._ctx.Queue(maxsize=8)
+        self._control_queue = self._ctx.Queue(maxsize=8)
         self._observation_queue = self._ctx.Queue(maxsize=max(1, history))
         self._request_queue = self._ctx.Queue(maxsize=1)
         self._reply_queue = self._ctx.Queue(maxsize=1)
         self._process: Optional[mp.Process] = None
 
-        self.action_stream = ActionStream(self._action_queue)
+        self.control_stream = ControlStream(self._control_queue)
         self.observation_stream = ObservationStream(self._observation_queue, history=history)
 
     def start(self, wait: bool = True):
@@ -323,11 +323,11 @@ class AsyncSimulation:
             daemon=True,
             args=(
                 self.env_factory,
-                self.action_freq,
+                self.control_freq,
                 self.observation_freq,
                 self._stop_event,
                 self._started_event,
-                self._action_queue,
+                self._control_queue,
                 self._observation_queue,
                 self._request_queue,
                 self._reply_queue,
@@ -421,7 +421,7 @@ class AsyncSimulation:
 def make_async(
     env_name: str,
     *args,
-    action_freq: float = 50.0,
+    control_freq: float = 50.0,
     observation_freq: float = 30.0,
     history: int = 1,
     **kwargs,
@@ -431,7 +431,7 @@ def make_async(
     Args:
         env_name (str): Name of the robosuite environment to initialize
         *args: Additional arguments to pass to the specific environment class initializer
-        action_freq (float): The frequency of the action stream in Hz.
+        control_freq (float): The frequency of the control stream in Hz.
         observation_freq (float): The frequency of the observation stream in Hz.
         history (int): The number of steps to store in the observation stream.
         **kwargs: Additional arguments to pass to the specific environment class initializer
@@ -439,8 +439,8 @@ def make_async(
         AsyncSimulation: Asynchronous simulation of the robosuite environment.
     """
     return AsyncSimulation(
-        env_factory = partial["MujocoEnv"](suite.make, env_name, *args, **kwargs),
-        action_freq = action_freq,
+        env_factory = partial(suite.make, env_name, *args, control_freq = control_freq, **kwargs),
+        control_freq = control_freq,
         observation_freq = observation_freq,
         history = history,
     )

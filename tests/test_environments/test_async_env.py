@@ -14,7 +14,7 @@ def test_async_simulation_runs_and_uses_latest_action():
         has_renderer=False,
         has_offscreen_renderer=False,
         use_camera_obs=False,
-        action_freq=20.0,
+        control_freq=20.0,
         observation_freq=10.0,
     )
 
@@ -27,7 +27,7 @@ def test_async_simulation_runs_and_uses_latest_action():
 
         new_action = np.zeros(retrieved_action_dim, dtype=np.float32)
         new_action[:2] = np.array([0.75, -0.25], dtype=np.float32)
-        sim.action_stream.push(new_action)
+        sim.control_stream.push(new_action)
 
         deadline = time.time() + 1.5
         next_step = None
@@ -49,7 +49,7 @@ def test_async_simulation_action_dim_without_start():
         has_renderer=False,
         has_offscreen_renderer=False,
         use_camera_obs=False,
-        action_freq=10.0,
+        control_freq=10.0,
         observation_freq=10.0,
     )
     try:
@@ -65,7 +65,7 @@ def test_async_simulation_stops_when_episode_done():
         has_renderer=False,
         has_offscreen_renderer=False,
         use_camera_obs=False,
-        action_freq=15.0,
+        control_freq=15.0,
         observation_freq=15.0,
     )
     try:
