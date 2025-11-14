@@ -46,18 +46,6 @@ class Response:
     error: Optional[str] = None
 
 
-def _publish_observation(queue_obj: "Queue", step: StepResult):
-    while True:
-        try:
-            queue_obj.put_nowait(step)
-            break
-        except queue.Full:
-            try:
-                queue_obj.get_nowait()
-            except queue.Empty:
-                break
-
-
 def _simulation_worker(
     env_factory: Callable[[], "MujocoEnv"],
     action_freq: float,
@@ -81,6 +69,17 @@ def _simulation_worker(
     current_step: Optional[StepResult] = None
     episode_done = False
 
+    def publish_observation(step: StepResult):
+        while True:
+            try:
+                observation_queue.put_nowait(step)
+                break
+            except queue.Full:
+                try:
+                    observation_queue.get_nowait()
+                except queue.Empty:
+                    break
+
     def reset_env():
         nonlocal latest_action, current_step
         try:
@@ -97,7 +96,7 @@ def _simulation_worker(
             action=latest_action.copy(),
             timestamp=time.time(),
         )
-        _publish_observation(observation_queue, current_step)
+        publish_observation(current_step)
 
     def drain_actions():
         nonlocal latest_action
@@ -169,7 +168,7 @@ def _simulation_worker(
         now = time.perf_counter()
         should_publish = now >= next_observation_time or done
         if should_publish:
-            _publish_observation(observation_queue, current_step)
+            publish_observation(current_step)
             while next_observation_time <= now:
                 next_observation_time += observation_period
 
@@ -180,7 +179,7 @@ def _simulation_worker(
         if done:
             episode_done = True
             if not should_publish:
-                _publish_observation(observation_queue, current_step)
+                publish_observation(current_step)
             next_action_time = time.perf_counter()
             next_observation_time = next_action_time
 
