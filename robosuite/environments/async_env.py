@@ -60,7 +60,6 @@ def _simulation_worker(
 ):
     # Instantiate environment in the worker process.
     env = env_factory()
-    env.initialize_time(action_freq)
 
     default_action = np.zeros_like(env.action_spec[0], dtype=np.float32)
     latest_action = default_action.copy()
@@ -80,10 +79,7 @@ def _simulation_worker(
 
     def reset_env():
         nonlocal latest_action, current_step
-        try:
-            env.initialize_time(action_freq)
-        except Exception as exc:
-            logger.debug("initialize_time during reset failed with %s", exc)
+        env.initialize_time(action_freq)
         observation = env.reset()
         latest_action = default_action.copy()
         current_step = StepResult(
