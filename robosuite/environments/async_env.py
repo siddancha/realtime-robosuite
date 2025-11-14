@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 import multiprocessing as mp
 import queue
@@ -47,22 +48,19 @@ class Response:
 
 
 def _simulation_worker(
-    env_factory: Callable[[], "MujocoEnv"],
+    env_factory: Callable[[], MujocoEnv],
     action_freq: float,
     observation_freq: float,
-    stop_event: "Event",
-    started_event: "Event",
-    action_queue: "Queue",
-    observation_queue: "Queue",
-    request_queue: "Queue",
-    reply_queue: "Queue",
+    stop_event: Event,
+    started_event: Event,
+    action_queue: Queue,
+    observation_queue: Queue,
+    request_queue: Queue,
+    reply_queue: Queue,
 ):
+    # Instantiate environment in the worker process.
     env = env_factory()
-
-    try:
-        env.initialize_time(action_freq)
-    except Exception as exc:
-        logger.debug("initialize_time failed with %s. Continuing with env defaults.", exc)
+    env.initialize_time(action_freq)
 
     default_action = np.zeros_like(env.action_spec[0], dtype=np.float32)
     latest_action = default_action.copy()
@@ -194,7 +192,7 @@ class ObservationStream:
     Interface for consuming observations produced by the asynchronous simulation process.
     """
 
-    def __init__(self, queue_obj: "Queue", history: int = 1):
+    def __init__(self, queue_obj: Queue, history: int = 1):
         if history <= 0:
             raise ValueError("ObservationStream history must be a positive integer.")
         self._queue = queue_obj
@@ -249,7 +247,7 @@ class ActionStream:
     Interface for pushing actions to the asynchronous simulation process.
     """
 
-    def __init__(self, queue_obj: "Queue"):
+    def __init__(self, queue_obj: Queue):
         self._queue = queue_obj
         self._lock = threading.Lock()
         self._latest: Optional[np.ndarray] = None
@@ -290,7 +288,7 @@ class AsyncSimulation:
 
     def __init__(
         self,
-        env_factory: Callable[[], "MujocoEnv"],
+        env_factory: Callable[[], MujocoEnv],
         action_freq: float = 50.0,
         observation_freq: float = 30.0,
         history: int = 1,
