@@ -8,6 +8,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from functools import cached_property, partial
 from multiprocessing.context import BaseContext
+from multiprocessing.queues import Queue as MPQueue
 from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
@@ -15,7 +16,6 @@ import robosuite as suite
 
 if TYPE_CHECKING:
     from robosuite.environments.base import MujocoEnv
-    from multiprocessing.queues import Queue
     from multiprocessing.synchronize import Event
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,38 @@ class Response:
     error: Optional[str] = None
 
 
+class Queue (MPQueue):
+    """
+    Multiprocessing queue that supports drop-oldest publish and draining the latest item.
+    """
+
+    def publish(self, item: Any):
+        """
+        Put an item into the queue, dropping the oldest element if the queue is full.
+        """
+        while True:
+            try:
+                self.put_nowait(item)
+                break
+            except queue.Full:
+                try:
+                    self.get_nowait()
+                except queue.Empty:
+                    break
+
+    def drain(self) -> Any:
+        """
+        Drain all items from the queue and return the latest one (optionally transformed).
+        """
+        latest: Optional[Any] = None
+        while True:
+            try:
+                latest = self.get_nowait()
+            except queue.Empty:
+                break
+        return latest
+
+
 def _simulation_worker(
     env_factory: Callable[[], MujocoEnv],
     control_freq: float,
@@ -66,17 +98,6 @@ def _simulation_worker(
     current_step: Optional[StepResult] = None
     episode_done = False
 
-    def publish_observation(step: StepResult):
-        while True:
-            try:
-                observation_queue.put_nowait(step)
-                break
-            except queue.Full:
-                try:
-                    observation_queue.get_nowait()
-                except queue.Empty:
-                    break
-
     def reset_env():
         nonlocal latest_action, current_step
         env.initialize_time(control_freq)
@@ -90,16 +111,7 @@ def _simulation_worker(
             action=latest_action.copy(),
             timestamp=time.time(),
         )
-        publish_observation(current_step)
-
-    def drain_actions():
-        nonlocal latest_action
-        while True:
-            try:
-                latest_action = control_queue.get_nowait()
-                latest_action = np.asarray(latest_action, dtype=np.float32).copy()
-            except queue.Empty:
-                break
+        observation_queue.publish(current_step)
 
     reset_env()
     started_event.set()
@@ -147,7 +159,9 @@ def _simulation_worker(
                 break
             continue
 
-        drain_actions()
+        latest_drained_action = control_queue.drain()
+        if latest_drained_action is not None:
+            latest_action = np.array(latest_drained_action, dtype=np.float32)
         observation, reward, done, info = env.step(latest_action.copy())
         timestamp = time.time()
         current_step = StepResult(
@@ -162,7 +176,7 @@ def _simulation_worker(
         now = time.perf_counter()
         should_publish = now >= next_observation_time or done
         if should_publish:
-            publish_observation(current_step)
+            observation_queue.publish(current_step)
             while next_observation_time <= now:
                 next_observation_time += observation_period
 
@@ -173,7 +187,7 @@ def _simulation_worker(
         if done:
             episode_done = True
             if not should_publish:
-                publish_observation(current_step)
+                observation_queue.publish(current_step)
             next_control_time = time.perf_counter()
             next_observation_time = next_control_time
 
@@ -254,15 +268,7 @@ class ControlStream:
         with self._lock:
             self._latest = action_array
             self._latest_timestamp = time.time()
-        while True:
-            try:
-                self._queue.put_nowait(action_array)
-                break
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
+        self._queue.publish(action_array)
 
     def latest(self) -> Optional[np.ndarray]:
         with self._lock:
@@ -301,8 +307,8 @@ class AsyncSimulation:
         self._ctx = ctx or mp.get_context("spawn")
         self._stop_event = self._ctx.Event()
         self._started_event = self._ctx.Event()
-        self._control_queue = self._ctx.Queue(maxsize=8)
-        self._observation_queue = self._ctx.Queue(maxsize=max(1, history))
+        self._control_queue = Queue(maxsize=8, ctx=self._ctx)
+        self._observation_queue = Queue(maxsize=max(1, history), ctx=self._ctx)
         self._request_queue = self._ctx.Queue(maxsize=1)
         self._reply_queue = self._ctx.Queue(maxsize=1)
         self._process: Optional[mp.Process] = None
