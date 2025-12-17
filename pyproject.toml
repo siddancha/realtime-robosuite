@@ -31,7 +31,6 @@ dependencies = [
     "pygments==2.19.1",
     "pynput==1.8.1",
     "pyopengl==3.1.9",
-    "pytest==8.4.0",
     "python-xlib==0.33",
     "qpsolvers==4.7.1",
     "quadprog==0.1.13",
@@ -44,6 +43,16 @@ dependencies = [
     "typing-extensions==4.14.0",
     "usd-core>=25.5.1",
     "zipp==3.22.0",
+]
+
+[dependency-groups]
+dev = [
+  "ipdb>=0.13.13",
+  "pre-commit>=4.3.0",
+  "pyright>=1.1.407",
+  "pytest>=8.4.2",
+  "ruff>=0.14.7",
+  "ty>=0.0.1a29",
 ]
 
 [build-system]

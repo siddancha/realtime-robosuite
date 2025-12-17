@@ -64,11 +64,11 @@ class Queue (MPQueue):
                 try:
                     self.get_nowait()
                 except queue.Empty:
-                    break
+                    continue
 
     def drain(self) -> Any:
         """
-        Drain all items from the queue and return the latest one (optionally transformed).
+        Drain all items from the queue and return the latest one.
         """
         latest: Optional[Any] = None
         while True:
@@ -83,8 +83,8 @@ def _simulation_worker(
     env_factory: Callable[[], MujocoEnv],
     control_freq: float,
     observation_freq: float,
+    start_event: Event,
     stop_event: Event,
-    started_event: Event,
     control_queue: Queue,
     observation_queue: Queue,
     request_queue: Queue,
@@ -102,7 +102,9 @@ def _simulation_worker(
         nonlocal latest_action, current_step
         env.initialize_time(control_freq)
         observation = env.reset()
+        observation_queue.drain()
         latest_action = default_action.copy()
+        control_queue.drain()
         current_step = StepResult(
             observation=observation,
             reward=0.0,
@@ -114,7 +116,7 @@ def _simulation_worker(
         observation_queue.publish(current_step)
 
     reset_env()
-    started_event.set()
+    start_event.set()
 
     control_period = 1.0 / control_freq
     observation_period = 1.0 / observation_freq
@@ -159,8 +161,7 @@ def _simulation_worker(
                 break
             continue
 
-        latest_drained_action = control_queue.drain()
-        if latest_drained_action is not None:
+        if (latest_drained_action := control_queue.drain()) is not None:
             latest_action = np.array(latest_drained_action, dtype=np.float32)
         observation, reward, done, info = env.step(latest_action.copy())
         timestamp = time.time()
@@ -320,8 +321,8 @@ class AsyncSimulation:
         if self._process and self._process.is_alive():
             raise RuntimeError("AsyncSimulation already running.")
 
+        self._start_event.clear()
         self._stop_event.clear()
-        self._started_event.clear()
 
         self._process = self._ctx.Process(
             target=_simulation_worker,
@@ -331,8 +332,8 @@ class AsyncSimulation:
                 self.env_factory,
                 self.control_freq,
                 self.observation_freq,
+                self._start_event,
                 self._stop_event,
-                self._started_event,
                 self._control_queue,
                 self._observation_queue,
                 self._request_queue,
