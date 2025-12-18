@@ -120,18 +120,20 @@ def _simulation_worker(
     # Instantiate environment in the worker process.
     env = env_factory()
 
-    default_action = np.zeros_like(env.action_spec[0], dtype=np.float32)
-    latest_action = default_action.copy()
-    current_step: Optional[StepResult] = None
     episode_done = False
 
     def reset_env():
-        nonlocal latest_action, current_step
         env.initialize_time(control_freq)
         observation = env.reset()
         observation_queue.drain()
-        latest_action = default_action.copy()
+        default_action = np.zeros_like(env.action_spec[0], dtype=np.float32)
+        latest_action = default_action
         control_queue.drain()
+
+        # Initialize periodic event generators
+        control_peg = PeriodicEventGenerator(frequency=control_freq)
+        observation_peg = PeriodicEventGenerator(frequency=observation_freq)
+
         current_step = StepResult(
             observation=observation,
             reward=0.0,
@@ -142,7 +144,9 @@ def _simulation_worker(
         )
         observation_queue.publish(current_step)
 
-    reset_env()
+        return latest_action, current_step, control_peg, observation_peg
+
+    latest_action, current_step, control_peg, observation_peg = reset_env()
     start_event.set()
 
     control_period = 1.0 / control_freq
