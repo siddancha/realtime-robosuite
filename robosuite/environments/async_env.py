@@ -47,6 +47,33 @@ class Response:
     error: Optional[str] = None
 
 
+class PeriodicEventGenerator:
+    def __init__(self, frequency: float, restart_period: bool = False, start_time: float = 0.0):
+        assert frequency > 0.0, "Frequency must be strictly positive."
+        assert start_time >= 0.0, "Start time must be non-negative."
+        self.period: float = 1.0 / frequency
+        self.last_event_time: float = start_time - self.period
+        self.restart_period = restart_period
+
+    def is_ready(self, timestamp: float) -> bool:
+        return timestamp >= self.last_event_time + self.period
+
+    def register_event(self, timestamp: float):
+        if not self.is_ready(timestamp):
+            raise ValueError(
+                "PeriodicEventGenerator.register_event() called at an invalid time. "
+                "Call is_ready() first to check if the event is ready to be registered."
+            )
+
+        time_elapsed = timestamp - self.last_event_time
+        assert time_elapsed >= 0.0, "Time elapsed must be non-negative."
+
+        self.last_event_time = timestamp
+
+        # Register this event not to the current time, but to the closest previous multiple of period.
+        if self.restart_period:
+            self.last_event_time -= time_elapsed % self.period
+
 class Queue (MPQueue):
     """
     Multiprocessing queue that supports drop-oldest publish and draining the latest item.
@@ -161,9 +188,13 @@ def _simulation_worker(
                 break
             continue
 
+        # Update the latest action from the control queue.
         if (latest_drained_action := control_queue.drain()) is not None:
             latest_action = np.array(latest_drained_action, dtype=np.float32)
+
+        # Take a step in the environment.
         observation, reward, done, info = env.step(latest_action.copy())
+
         timestamp = time.time()
         current_step = StepResult(
             observation=observation,
@@ -307,7 +338,7 @@ class AsyncSimulation:
         self.observation_freq = float(observation_freq)
         self._ctx = ctx or mp.get_context("spawn")
         self._stop_event = self._ctx.Event()
-        self._started_event = self._ctx.Event()
+        self._start_event = self._ctx.Event()
         self._control_queue = Queue(maxsize=8, ctx=self._ctx)
         self._observation_queue = Queue(maxsize=max(1, history), ctx=self._ctx)
         self._request_queue = self._ctx.Queue(maxsize=1)
@@ -343,7 +374,7 @@ class AsyncSimulation:
         self._process.start()
 
         if wait:
-            started = self._started_event.wait(timeout=10.0)
+            started = self._start_event.wait(timeout=10.0)
             if not started:
                 self.stop(wait=False)
                 raise TimeoutError("AsyncSimulation failed to start within 10 seconds.")
@@ -364,7 +395,7 @@ class AsyncSimulation:
             self._process.terminate()
             self._process.join(timeout=5.0)
         self._process = None
-        self._started_event.clear()
+        self._start_event.clear()
 
     def reset(self):
         if not self.is_running():
