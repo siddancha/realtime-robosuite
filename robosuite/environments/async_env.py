@@ -7,7 +7,7 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from functools import cached_property, partial
-from multiprocessing.context import BaseContext
+from multiprocessing.context import SpawnContext
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
 
@@ -16,6 +16,7 @@ import robosuite as suite
 
 if TYPE_CHECKING:
     from robosuite.environments.base import MujocoEnv
+    from multiprocessing.context import SpawnProcess
     from multiprocessing.synchronize import Event
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,8 @@ def _simulation_worker(
     env_factory: Callable[[], MujocoEnv],
     control_freq: float,
     observation_freq: float,
+    visualization_freq: Optional[float],
+    reward_freq: float,
     start_event: Event,
     stop_event: Event,
     control_queue: Queue,
@@ -120,8 +123,6 @@ def _simulation_worker(
     # Instantiate environment in the worker process.
     env = env_factory()
 
-    episode_done = False
-
     def reset_env():
         env.initialize_time(control_freq)
         observation = env.reset()
@@ -131,8 +132,13 @@ def _simulation_worker(
         control_queue.drain()
 
         # Initialize periodic event generators
-        control_peg = PeriodicEventGenerator(frequency=control_freq)
-        observation_peg = PeriodicEventGenerator(frequency=observation_freq)
+        control_peg = PeriodicEventGenerator(control_freq, restart_period=False)
+        obs_peg = PeriodicEventGenerator(frequency=observation_freq, restart_period=False)
+        reward_peg = PeriodicEventGenerator(reward_freq, restart_period=False)
+        if visualization_freq is not None:
+            viz_peg = PeriodicEventGenerator(visualization_freq, restart_period=True)
+        else:
+            viz_peg = None
 
         current_step = StepResult(
             observation=observation,
@@ -144,9 +150,23 @@ def _simulation_worker(
         )
         observation_queue.publish(current_step)
 
-        return latest_action, current_step, control_peg, observation_peg
+        sim_time: float = env.sim.data.time
+        episode_done: bool = False
 
-    latest_action, current_step, control_peg, observation_peg = reset_env()
+        return sim_time, latest_action, current_step, episode_done, control_peg, obs_peg, reward_peg, viz_peg
+
+    # Reset the environment
+    (
+        sim_time,
+        latest_action,
+        current_step,
+        episode_done,
+        control_peg,
+        observation_peg,
+        reward_peg,
+        visualization_peg,
+    ) = reset_env()
+
     start_event.set()
 
     control_period = 1.0 / control_freq
@@ -154,19 +174,27 @@ def _simulation_worker(
     next_control_time = time.perf_counter()
     next_observation_time = next_control_time
 
-    while not stop_event.is_set():
-        while True:
-            try:
-                request: Request = request_queue.get_nowait()
-            except queue.Empty:
-                break
+    while True:
+        # Check for requests from the parent process.
+        try:
+            # Requests are blocking until there is a reply on thr reply queue.
+            # So there will only be one request at a time.
+            request: Request = request_queue.get_nowait()
 
             assert isinstance(request, Request), f"Expected Request, got {type(request)}"
             command = request.command
 
             if command == "reset":
-                reset_env()
-                episode_done = False
+                (
+                    sim_time,
+                    latest_action,
+                    current_step,
+                    episode_done,
+                    control_peg,
+                    observation_peg,
+                    reward_peg,
+                    visualization_peg,
+                ) = reset_env()
                 next_control_time = time.perf_counter()
                 next_observation_time = next_control_time
                 reply_queue.put(Response(command=command, payload=None))
@@ -178,12 +206,16 @@ def _simulation_worker(
                 reply_queue.put(Response(command=command, payload=env.action_dim))
             else:
                 raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
-        if stop_event.is_set():
-            break
 
-        if episode_done:
-            stop_event.wait(timeout=0.01)
-            continue
+        except queue.Empty:
+            pass
+
+        # Take a step in the environment.
+        # observation, reward, done, info = env.step(latest_action.copy())
+        # sim_time = env.sim.data.time
+        # TODO (Sid): We're continuing from here.
+
+        # ==========================================================================================
 
         now = time.perf_counter()
         sleep_time = next_control_time - now
@@ -227,10 +259,7 @@ def _simulation_worker(
             next_control_time = time.perf_counter()
             next_observation_time = next_control_time
 
-    try:
-        env.close()
-    except Exception:
-        pass
+    env.close()
 
 
 class ObservationStream:
@@ -329,8 +358,10 @@ class AsyncSimulation:
         env_factory: Callable[[], MujocoEnv],
         control_freq: float = 50.0,
         observation_freq: float = 30.0,
+        visualization_freq: Optional[float] = 33.0,
+        reward_freq: float = 10.0,
         history: int = 1,
-        ctx: Optional[BaseContext] = None,
+        ctx: Optional[SpawnContext] = None,
     ):
         if control_freq <= 0:
             raise ValueError("control_freq must be > 0.")
@@ -340,6 +371,8 @@ class AsyncSimulation:
         self.env_factory = env_factory
         self.control_freq = float(control_freq)
         self.observation_freq = float(observation_freq)
+        self.visualization_freq = visualization_freq
+        self.reward_freq = float(reward_freq)
         self._ctx = ctx or mp.get_context("spawn")
         self._stop_event = self._ctx.Event()
         self._start_event = self._ctx.Event()
@@ -347,7 +380,7 @@ class AsyncSimulation:
         self._observation_queue = Queue(maxsize=max(1, history), ctx=self._ctx)
         self._request_queue = self._ctx.Queue(maxsize=1)
         self._reply_queue = self._ctx.Queue(maxsize=1)
-        self._process: Optional[mp.Process] = None
+        self._process: Optional[SpawnProcess] = None
 
         self.control_stream = ControlStream(self._control_queue)
         self.observation_stream = ObservationStream(self._observation_queue, history=history)
@@ -367,6 +400,8 @@ class AsyncSimulation:
                 self.env_factory,
                 self.control_freq,
                 self.observation_freq,
+                self.visualization_freq,
+                self.reward_freq,
                 self._start_event,
                 self._stop_event,
                 self._control_queue,
@@ -418,7 +453,7 @@ class AsyncSimulation:
         request = Request(command=command, payload=payload)
         self._request_queue.put(request)
         try:
-            response = self._reply_queue.get(timeout=timeout)
+            response = self._reply_queue.get(block=True, timeout=timeout)
         except queue.Empty as exc:
             raise RuntimeError(f"Timed out waiting for response to command {command!r}.") from exc
 
