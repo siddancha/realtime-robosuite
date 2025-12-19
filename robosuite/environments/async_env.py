@@ -218,11 +218,19 @@ class SimulationWorker:
             raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
 
     def is_any_peg_ready(self) -> bool:
-        return (
-            self.control_peg.is_ready(self.sim_time) or
-            self.obs_peg.is_ready(self.sim_time) or
-            self.reward_peg.is_ready(self.sim_time)
-        )
+        if self.obs_peg.is_ready(self.sim_time):
+            return True
+
+        if self.viz_peg is not None and self.viz_peg.is_ready(self.sim_time):
+            return True
+
+        if self.reward_peg.is_ready(self.sim_time):
+            return True
+
+        if self.control_peg.is_ready(self.sim_time):
+            return True
+
+        return False
 
     def take_env_step(self) -> StepResult:
         observation, reward, done, info = self.env.step(self.latest_action.copy())
