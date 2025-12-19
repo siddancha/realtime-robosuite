@@ -133,7 +133,6 @@ class SimulationWorker:
     reward_peg: PeriodicEventGenerator
     viz_peg: Optional[PeriodicEventGenerator]
     latest_action: np.ndarray
-    episode_done: bool
     last_sim_stamp: float
     last_real_stamp: float
 
@@ -200,7 +199,6 @@ class SimulationWorker:
             timestamp=time.time(),
         )
         self.observation_queue.publish(current_step)
-        self.episode_done = False
 
     def handle_request(self, request: Request):
         assert isinstance(request, Request), f"Expected Request, got {type(request)}"
@@ -314,6 +312,7 @@ class SimulationWorker:
 
             if current_step.done:
                 self.observation_queue.publish(current_step)
+                break
 
         self.env.close()
 
