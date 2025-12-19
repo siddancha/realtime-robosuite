@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import mujoco
 import multiprocessing as mp
 import queue
 import threading
@@ -15,7 +16,9 @@ import numpy as np
 import robosuite as suite
 
 if TYPE_CHECKING:
+    import mujoco.viewer
     from robosuite.environments.base import MujocoEnv
+    from robosuite.renderers.viewer import MjviewerRenderer
     from multiprocessing.context import SpawnProcess
     from multiprocessing.synchronize import Event
 
@@ -236,6 +239,18 @@ class SimulationWorker:
     def sync_time(self):
         pass
 
+    def add_overlays_to_viz(self):
+        renderer: MjviewerRenderer | None = getattr(self.env, "viewer", None)
+        if renderer is None: return
+        viewer_handle: mujoco.viewer.Handle = renderer.viewer
+
+        # TODO (Sid): compute real time rate
+        observed_rtr = 1.0
+        viewer_handle.set_texts([
+            (None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "Simulation time", f"{self.sim_time:.3f}s"),
+            (None, mujoco.mjtGridPos.mjGRID_TOPRIGHT, "Real-time rate", f"{observed_rtr:.3f}")
+        ])
+
     def run(self):
         # Main worker loop
         while True:
@@ -272,6 +287,12 @@ class SimulationWorker:
             if self.obs_peg.is_ready(self.sim_time):
                 self.observation_queue.publish(current_step)
                 self.obs_peg.register_event(self.sim_time)
+    
+            # Update visualization.
+            if self.viz_peg is not None and self.viz_peg.is_ready(self.sim_time):
+                self.add_overlays_to_viz()
+                self.env.render()
+                self.viz_peg.register_event(self.sim_time)
 
             if current_step.done:
                 self.observation_queue.publish(current_step)
