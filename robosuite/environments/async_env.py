@@ -116,6 +116,7 @@ class SimulationWorkerConf:
     control_freq: float
     observation_freq: float
     visualization_freq: Optional[float]
+    target_real_time_rate: float
     reward_freq: float
     start_event: Event
     stop_event: Event
@@ -125,6 +126,7 @@ class SimulationWorkerConf:
     reply_queue: Queue
 
 class SimulationWorker:
+    conf: SimulationWorkerConf
     env: MujocoEnv
     control_peg: PeriodicEventGenerator
     obs_peg: PeriodicEventGenerator
@@ -132,6 +134,8 @@ class SimulationWorker:
     viz_peg: Optional[PeriodicEventGenerator]
     latest_action: np.ndarray
     episode_done: bool
+    last_sim_stamp: float
+    last_real_stamp: float
 
     def __init__(self, conf: SimulationWorkerConf):
         self.conf = conf
@@ -151,7 +155,7 @@ class SimulationWorker:
 
     @property
     def sim_time(self) -> float:
-        return self.env.sim.data.time
+        return float(self.env.sim.data.time)
 
     @property
     def observation_queue(self) -> Queue:
@@ -235,9 +239,21 @@ class SimulationWorker:
             timestamp=timestamp,
         )
 
-    # TODO: Implement this.
+    def update_timestamps(self):
+        self.last_sim_stamp = self.sim_time
+        self.last_real_stamp = time.perf_counter()
+
     def sync_time(self):
-        pass
+        curr_real_time = time.perf_counter()
+        real_duration = curr_real_time - self.last_real_stamp
+        sim_duration = self.sim_time - self.last_sim_stamp
+
+        # Sleep to catch up with simulation time
+        target_real_duration = sim_duration / self.conf.target_real_time_rate
+        if target_real_duration >= real_duration:
+            time.sleep(target_real_duration - real_duration)
+
+        self.update_timestamps()
 
     def add_overlays_to_viz(self):
         renderer: MjviewerRenderer | None = getattr(self.env, "viewer", None)
@@ -252,6 +268,8 @@ class SimulationWorker:
         ])
 
     def run(self):
+        self.update_timestamps()
+
         # Main worker loop
         while True:
             # Check for requests from the parent process.
@@ -554,7 +572,8 @@ class AsyncSimulation:
         env_factory: Callable[[], MujocoEnv],
         control_freq: float = 50.0,
         observation_freq: float = 30.0,
-        visualization_freq: Optional[float] = 33.0,
+        visualization_freq: Optional[float] = 20.0,
+        target_real_time_rate: float = 1.0,
         reward_freq: float = 10.0,
         history: int = 1,
         ctx: Optional[SpawnContext] = None,
@@ -564,14 +583,9 @@ class AsyncSimulation:
         if observation_freq <= 0:
             raise ValueError("observation_freq must be > 0.")
 
-        self.env_factory = env_factory
-        self.control_freq = float(control_freq)
-        self.observation_freq = float(observation_freq)
-        self.visualization_freq = visualization_freq
-        self.reward_freq = float(reward_freq)
         self._ctx = ctx or mp.get_context("spawn")
-        self._stop_event = self._ctx.Event()
         self._start_event = self._ctx.Event()
+        self._stop_event = self._ctx.Event()
         self._control_queue = Queue(maxsize=8, ctx=self._ctx)
         self._observation_queue = Queue(maxsize=max(1, history), ctx=self._ctx)
         self._request_queue = Queue(maxsize=1, ctx=self._ctx)
@@ -581,19 +595,13 @@ class AsyncSimulation:
         self.control_stream = ControlStream(self._control_queue)
         self.observation_stream = ObservationStream(self._observation_queue, history=history)
 
-    def start(self, wait: bool = True):
-        if self._process and self._process.is_alive():
-            raise RuntimeError("AsyncSimulation already running.")
-
-        self._start_event.clear()
-        self._stop_event.clear()
-
-        worker_conf = SimulationWorkerConf(
-            self.env_factory,
-            self.control_freq,
-            self.observation_freq,
-            self.visualization_freq,
-            self.reward_freq,
+        self.worker_conf = SimulationWorkerConf(
+            env_factory,
+            control_freq,
+            observation_freq,
+            visualization_freq,
+            target_real_time_rate,
+            reward_freq,
             self._start_event,
             self._stop_event,
             self._control_queue,
@@ -602,11 +610,18 @@ class AsyncSimulation:
             self._reply_queue
         )
 
+    def start(self, wait: bool = True):
+        if self._process and self._process.is_alive():
+            raise RuntimeError("AsyncSimulation already running.")
+
+        self._start_event.clear()
+        self._stop_event.clear()
+
         self._process = self._ctx.Process(
             target=_simulation_worker,
             name="AsyncSimulationProcess",
             daemon=True,
-            args=(worker_conf,),
+            args=(self.worker_conf,),
         )
         self._process.start()
 
