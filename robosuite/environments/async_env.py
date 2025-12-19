@@ -128,7 +128,7 @@ class SimulationWorkerConf:
 class SimulationWorker:
     conf: SimulationWorkerConf
     env: MujocoEnv
-    control_peg: PeriodicEventGenerator
+    sync_peg: PeriodicEventGenerator
     obs_peg: PeriodicEventGenerator
     reward_peg: PeriodicEventGenerator
     viz_peg: Optional[PeriodicEventGenerator]
@@ -185,7 +185,7 @@ class SimulationWorker:
         self.control_queue.drain()
 
         # Create periodic event generators.
-        self.control_peg = PeriodicEventGenerator(
+        self.sync_peg = PeriodicEventGenerator(
             frequency = self.conf.control_freq,
             start_time = self.sim_time,
             restart_period = False,
@@ -300,8 +300,12 @@ class SimulationWorker:
 
             # Synchronize sim time with real time if either an observation needs to be produced now
             # or if its time now to periodically sync them.
-            if self.obs_peg.is_ready(self.sim_time) or self.control_peg.is_ready(self.sim_time):
+            if self.obs_peg.is_ready(self.sim_time) or self.sync_peg.is_ready(self.sim_time):
                 self.sync_time()
+    
+            # Automatically register the sync event since we always sync time when ready.
+            if self.sync_peg.is_ready(self.sim_time):
+                self.sync_peg.register_event(self.sim_time)
 
             # Publish observation.
             if self.obs_peg.is_ready(self.sim_time):
@@ -311,10 +315,7 @@ class SimulationWorker:
             # Update the latest action from the control queue.
             if (drained_action := self.control_queue.drain()) is not None:
                 self.latest_action = np.array(drained_action, dtype=np.float32)
-            if self.control_peg.is_ready(self.sim_time):
-                # Automatically register the event since we have already synced time.
-                self.control_peg.register_event(self.sim_time)
-    
+
             # Update visualization.
             curr_real_time = self.real_time
             if self.viz_peg is not None and self.viz_peg.is_ready(curr_real_time):
