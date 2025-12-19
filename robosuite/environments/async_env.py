@@ -253,11 +253,16 @@ class SimulationWorker:
 
         self.update_timestamps()
 
-    def add_overlays_to_viz(self):
+    def update_viz(self):
         renderer: MjviewerRenderer | None = getattr(self.env, "viewer", None)
-        if renderer is None: return
+        if renderer is None:
+            return
         viewer_handle: mujoco.viewer.Handle = renderer.viewer
 
+        # Render the environment
+        renderer.render()
+
+        # Add overlays to the visualizer
         # TODO (Sid): compute real time rate
         observed_rtr = 1.0
         viewer_handle.set_texts([
@@ -265,7 +270,7 @@ class SimulationWorker:
             (None, mujoco.mjtGridPos.mjGRID_TOPRIGHT, "Real-time rate", f"{observed_rtr:.3f}")
         ])
 
-    def run(self):
+    def main_loop(self):
         self.update_timestamps()
 
         # Main worker loop
@@ -306,8 +311,7 @@ class SimulationWorker:
     
             # Update visualization.
             if self.viz_peg is not None and self.viz_peg.is_ready(self.sim_time):
-                self.add_overlays_to_viz()
-                self.env.render()
+                self.update_viz()
                 self.viz_peg.register_event(self.sim_time)
 
             if current_step.done:
@@ -316,9 +320,10 @@ class SimulationWorker:
 
         self.env.close()
 
-def _simulation_worker(conf: SimulationWorkerConf):
-    worker = SimulationWorker(conf)
-    worker.run()
+    @staticmethod
+    def runner(conf: SimulationWorkerConf):
+        worker = SimulationWorker(conf)
+        worker.main_loop()
 
 def _simulation_worker_old(
     env_factory: Callable[[], MujocoEnv],
@@ -617,7 +622,7 @@ class AsyncSimulation:
         self._stop_event.clear()
 
         self._process = self._ctx.Process(
-            target=_simulation_worker,
+            target=SimulationWorker.runner,
             name="AsyncSimulationProcess",
             daemon=True,
             args=(self.worker_conf,),
