@@ -263,7 +263,7 @@ class SimulationWorker:
         # TODO (Sid): compute real time rate
         observed_rtr = 1.0
         viewer_handle.set_texts([
-            (None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "Simulation time", f"{self.sim_time:.3f}s"),
+            (None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "Async. simulation time", f"{self.sim_time:.3f}s"),
             (None, mujoco.mjtGridPos.mjGRID_TOPRIGHT, "Real-time rate", f"{observed_rtr:.3f}")
         ])
 
