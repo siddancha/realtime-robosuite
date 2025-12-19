@@ -52,7 +52,7 @@ class Response:
 
 
 class PeriodicEventGenerator:
-    def __init__(self, frequency: float, restart_period: bool = False, start_time: float = 0.0):
+    def __init__(self, frequency: float, start_time: float = 0.0, restart_period: bool = False):
         assert frequency > 0.0, "Frequency must be strictly positive."
         assert start_time >= 0.0, "Start time must be non-negative."
         self.period: float = 1.0 / frequency
@@ -157,6 +157,10 @@ class SimulationWorker:
         return float(self.env.sim.data.time)
 
     @property
+    def real_time(self) -> float:
+        return time.perf_counter()
+
+    @property
     def observation_queue(self) -> Queue:
         return self.conf.observation_queue
     
@@ -180,25 +184,37 @@ class SimulationWorker:
         self.latest_action = self.default_action
         self.control_queue.drain()
 
-        # Reset periodic event generators
         # Create periodic event generators.
-        self.control_peg = PeriodicEventGenerator(self.conf.control_freq, restart_period=False)
-        self.obs_peg = PeriodicEventGenerator(frequency=self.conf.observation_freq, restart_period=False)
-        self.reward_peg = PeriodicEventGenerator(self.conf.reward_freq, restart_period=False)
-        if self.conf.visualization_freq is not None:
-            self.viz_peg = PeriodicEventGenerator(self.conf.visualization_freq, restart_period=True)
-        else:
-            self.viz_peg = None
+        self.control_peg = PeriodicEventGenerator(
+            frequency = self.conf.control_freq,
+            start_time = self.sim_time,
+            restart_period = False,
+        )
+        self.obs_peg = PeriodicEventGenerator(
+            frequency = self.conf.observation_freq,
+            start_time = self.sim_time,
+            restart_period = False,
+        )
+        self.reward_peg = PeriodicEventGenerator(
+            frequency = self.conf.reward_freq,
+            start_time = self.sim_time,
+            restart_period = False,
+        )
+        self.viz_peg = PeriodicEventGenerator(
+            frequency = self.conf.visualization_freq,
+            start_time = self.real_time,  # visualization should track real time
+            restart_period = True,  # no need to throttle visualization frequency during delays
+        ) if self.conf.visualization_freq is not None else None
 
-        current_step = StepResult(
+        step_result = StepResult(
             observation=observation,
             reward=0.0,
             done=False,
             info={"reset": True},
             action=self.latest_action.copy(),
-            timestamp=time.time(),
+            timestamp=self.sim_time,
         )
-        self.observation_queue.publish(current_step)
+        self.observation_queue.publish(step_result)
 
     def handle_request(self, request: Request):
         assert isinstance(request, Request), f"Expected Request, got {type(request)}"
@@ -215,41 +231,24 @@ class SimulationWorker:
         else:
             raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
 
-    def is_any_peg_ready(self) -> bool:
-        if self.obs_peg.is_ready(self.sim_time):
-            return True
-
-        if self.viz_peg is not None and self.viz_peg.is_ready(self.sim_time):
-            return True
-
-        if self.reward_peg.is_ready(self.sim_time):
-            return True
-
-        if self.control_peg.is_ready(self.sim_time):
-            return True
-
-        return False
-
     def take_env_step(self) -> StepResult:
         observation, reward, done, info = self.env.step(self.latest_action.copy())
 
-        timestamp = time.time()
         return StepResult(
             observation=observation,
             reward=reward,
             done=done,
             info=info,
             action=self.latest_action.copy(),
-            timestamp=timestamp,
+            timestamp=self.real_time,
         )
 
     def update_timestamps(self):
         self.last_sim_stamp = self.sim_time
-        self.last_real_stamp = time.perf_counter()
+        self.last_real_stamp = self.real_time
 
     def sync_time(self):
-        curr_real_time = time.perf_counter()
-        real_duration = curr_real_time - self.last_real_stamp
+        real_duration = self.real_time - self.last_real_stamp
         sim_duration = self.sim_time - self.last_sim_stamp
 
         # Sleep to catch up with simulation time
@@ -297,31 +296,33 @@ class SimulationWorker:
                 break
 
             # Take a step in the environment.
-            current_step = self.take_env_step()
+            step_result = self.take_env_step()
 
-            # Check if any of the periodic event generators are ready. 
-            # If any of them is ready, then we need to synchronize real time with simulation time.
-            if self.is_any_peg_ready():
+            # Synchronize sim time with real time if either an observation needs to be produced now
+            # or if its time now to periodically sync them.
+            if self.obs_peg.is_ready(self.sim_time) or self.control_peg.is_ready(self.sim_time):
                 self.sync_time()
 
-            # Update the latest action from the control queue.
-            if self.control_peg.is_ready(self.sim_time):
-                if (drained_action := self.control_queue.drain()) is not None:
-                    self.latest_action = np.array(drained_action, dtype=np.float32)
-                self.control_peg.register_event(self.sim_time)
-        
             # Publish observation.
             if self.obs_peg.is_ready(self.sim_time):
-                self.observation_queue.publish(current_step)
+                self.observation_queue.publish(step_result)
                 self.obs_peg.register_event(self.sim_time)
+
+            # Update the latest action from the control queue.
+            if (drained_action := self.control_queue.drain()) is not None:
+                self.latest_action = np.array(drained_action, dtype=np.float32)
+            if self.control_peg.is_ready(self.sim_time):
+                # Automatically register the event since we have already synced time.
+                self.control_peg.register_event(self.sim_time)
     
             # Update visualization.
-            if self.viz_peg is not None and self.viz_peg.is_ready(self.sim_time):
+            curr_real_time = self.real_time
+            if self.viz_peg is not None and self.viz_peg.is_ready(curr_real_time):
                 self.update_viz()
-                self.viz_peg.register_event(self.sim_time)
+                self.viz_peg.register_event(curr_real_time)
 
-            if current_step.done:
-                self.observation_queue.publish(current_step)
+            if step_result.done:
+                self.observation_queue.publish(step_result)
                 break
 
         self.env.close()
@@ -402,7 +403,7 @@ class ControlStream:
         action_array = np.asarray(action, dtype=np.float32).copy()
         with self._lock:
             self._latest = action_array
-            self._latest_timestamp = time.time()
+            self._latest_timestamp = time.perf_counter()
         self._queue.publish(action_array)
 
     def latest(self) -> Optional[np.ndarray]:
@@ -421,6 +422,24 @@ class AsyncSimulation:
     Runs a robosuite environment in a separate process at approximately real-time rate.
     The parent process (typically running the policy) interacts with the simulation through
     action and observation streams.
+
+    The control frequency is defined as follows: the control period (= 1.0 / control_freq) is the
+    maximum time interval between sending a new control command and when that control command will
+    be executed in the simulation.
+    • Functionally, it is the (minimum) rate at which the simulation time is synced with real time.
+    • A higher control frequency means that the delay between sending a new control command and its
+      execution in the simulation is smaller, but at the cost of more frequent synchronization with
+      real time with smaller sleep intervals.
+
+    Args:
+        env_factory (Callable[[], MujocoEnv]): Factory function that creates a new environment instance.
+        control_freq (float): The frequency of the control stream in Hz.
+        observation_freq (float): The frequency of the observation stream in Hz.
+        visualization_freq (Optional[float]): The frequency of the visualization stream in Hz.
+        target_real_time_rate (float): The target real-time rate of the simulation.
+        reward_freq (float): The frequency of the reward stream in Hz.
+        history (int): The number of steps to store in the observation stream.
+        ctx (Optional[SpawnContext]): The multiprocessing context to use.
     """
 
     def __init__(
