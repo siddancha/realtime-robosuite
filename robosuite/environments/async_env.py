@@ -107,7 +107,182 @@ class Queue (MPQueue):
         return latest
 
 
-def _simulation_worker(
+@dataclass
+class SimulationWorkerConf:
+    env_factory: Callable[[], MujocoEnv]
+    control_freq: float
+    observation_freq: float
+    visualization_freq: Optional[float]
+    reward_freq: float
+    start_event: Event
+    stop_event: Event
+    control_queue: Queue
+    observation_queue: Queue
+    request_queue: Queue
+    reply_queue: Queue
+
+class SimulationWorker:
+    env: MujocoEnv
+    control_peg: PeriodicEventGenerator
+    obs_peg: PeriodicEventGenerator
+    reward_peg: PeriodicEventGenerator
+    viz_peg: Optional[PeriodicEventGenerator]
+    latest_action: np.ndarray
+    episode_done: bool
+
+    def __init__(self, conf: SimulationWorkerConf):
+        self.conf = conf
+
+        # Instantiate environment in the worker process.
+        self.env = self.conf.env_factory()
+
+        # Reset the environment
+        self.reset()
+
+        # Signal to the parent process that initialization is complete.
+        self.conf.start_event.set()
+
+    @property
+    def default_action(self) -> np.ndarray:
+        return np.zeros_like(self.env.action_spec[0], dtype=np.float32)
+
+    @property
+    def sim_time(self) -> float:
+        return self.env.sim.data.time
+
+    @property
+    def observation_queue(self) -> Queue:
+        return self.conf.observation_queue
+    
+    @property
+    def control_queue(self) -> Queue:
+        return self.conf.control_queue
+    
+    @property
+    def request_queue(self) -> Queue:
+        return self.conf.request_queue
+    
+    @property
+    def reply_queue(self) -> Queue:
+        return self.conf.reply_queue
+    
+    def reset(self):
+        self.env.initialize_time(self.conf.control_freq)
+
+        observation = self.env.reset()
+        self.observation_queue.drain()
+        self.latest_action = self.default_action
+        self.control_queue.drain()
+
+        # Reset periodic event generators
+        # Create periodic event generators.
+        self.control_peg = PeriodicEventGenerator(self.conf.control_freq, restart_period=False)
+        self.obs_peg = PeriodicEventGenerator(frequency=self.conf.observation_freq, restart_period=False)
+        self.reward_peg = PeriodicEventGenerator(self.conf.reward_freq, restart_period=False)
+        if self.conf.visualization_freq is not None:
+            self.viz_peg = PeriodicEventGenerator(self.conf.visualization_freq, restart_period=True)
+        else:
+            self.viz_peg = None
+
+        current_step = StepResult(
+            observation=observation,
+            reward=0.0,
+            done=False,
+            info={"reset": True},
+            action=self.latest_action.copy(),
+            timestamp=time.time(),
+        )
+        self.observation_queue.publish(current_step)
+        self.episode_done = False
+
+    def handle_request(self, request: Request):
+        assert isinstance(request, Request), f"Expected Request, got {type(request)}"
+        command = request.command
+
+        if command == "reset":
+            self.reset()
+            next_control_time = time.perf_counter()
+            next_observation_time = next_control_time
+            self.reply_queue.put(Response(command=command, payload=None))
+        elif command == "shutdown":
+            self.conf.stop_event.set()
+            self.reply_queue.put(Response(command=command, payload=None))
+        elif command == "get_action_dim":
+            self.reply_queue.put(Response(command=command, payload=self.env.action_dim))
+        else:
+            raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
+
+    def is_any_peg_ready(self) -> bool:
+        return (
+            self.control_peg.is_ready(self.sim_time) or
+            self.obs_peg.is_ready(self.sim_time) or
+            self.reward_peg.is_ready(self.sim_time)
+        )
+
+    def take_env_step(self) -> StepResult:
+        observation, reward, done, info = self.env.step(self.latest_action.copy())
+
+        timestamp = time.time()
+        return StepResult(
+            observation=observation,
+            reward=reward,
+            done=done,
+            info=info,
+            action=self.latest_action.copy(),
+            timestamp=timestamp,
+        )
+
+    # TODO: Implement this.
+    def sync_time(self):
+        pass
+
+    def run(self):
+        # Main worker loop
+        while True:
+            # Check for requests from the parent process.
+            try:
+                # Requests are blocking until there is a reply on thr reply queue.
+                # So there will only be one request at a time.
+                request = self.conf.request_queue.get_nowait()
+
+                # If a request is succesfully received, handle it.
+                self.handle_request(request)
+            except queue.Empty:
+                pass
+
+            # Stop running the loop if the stop event is set.
+            if self.conf.stop_event.is_set():
+                break
+
+            # Take a step in the environment.
+            current_step = self.take_env_step()
+
+            # Check if any of the periodic event generators are ready. 
+            # If any of them is ready, then we need to synchronize real time with simulation time.
+            if self.is_any_peg_ready():
+                self.sync_time()
+
+            # Update the latest action from the control queue.
+            if self.control_peg.is_ready(self.sim_time):
+                if (drained_action := self.control_queue.drain()) is not None:
+                    self.latest_action = np.array(drained_action, dtype=np.float32)
+                self.control_peg.register_event(self.sim_time)
+        
+            # Publish observation.
+            if self.obs_peg.is_ready(self.sim_time):
+                self.observation_queue.publish(current_step)
+                self.obs_peg.register_event(self.sim_time)
+
+            if current_step.done:
+                self.observation_queue.publish(current_step)
+
+        self.env.close()
+
+def _simulation_worker(conf: SimulationWorkerConf):
+    worker = SimulationWorker(conf)
+    worker.run()
+
+def _simulation_worker_old(
     env_factory: Callable[[], MujocoEnv],
     control_freq: float,
     observation_freq: float,
@@ -225,8 +400,8 @@ def _simulation_worker(
             continue
 
         # Update the latest action from the control queue.
-        if (latest_drained_action := control_queue.drain()) is not None:
-            latest_action = np.array(latest_drained_action, dtype=np.float32)
+        if (drained_action := control_queue.drain()) is not None:
+            latest_action = np.array(drained_action, dtype=np.float32)
 
         # Take a step in the environment.
         observation, reward, done, info = env.step(latest_action.copy())
@@ -378,8 +553,8 @@ class AsyncSimulation:
         self._start_event = self._ctx.Event()
         self._control_queue = Queue(maxsize=8, ctx=self._ctx)
         self._observation_queue = Queue(maxsize=max(1, history), ctx=self._ctx)
-        self._request_queue = self._ctx.Queue(maxsize=1)
-        self._reply_queue = self._ctx.Queue(maxsize=1)
+        self._request_queue = Queue(maxsize=1, ctx=self._ctx)
+        self._reply_queue = Queue(maxsize=1, ctx=self._ctx)
         self._process: Optional[SpawnProcess] = None
 
         self.control_stream = ControlStream(self._control_queue)
@@ -392,23 +567,25 @@ class AsyncSimulation:
         self._start_event.clear()
         self._stop_event.clear()
 
+        worker_conf = SimulationWorkerConf(
+            self.env_factory,
+            self.control_freq,
+            self.observation_freq,
+            self.visualization_freq,
+            self.reward_freq,
+            self._start_event,
+            self._stop_event,
+            self._control_queue,
+            self._observation_queue,
+            self._request_queue,
+            self._reply_queue
+        )
+
         self._process = self._ctx.Process(
             target=_simulation_worker,
             name="AsyncSimulationProcess",
             daemon=True,
-            args=(
-                self.env_factory,
-                self.control_freq,
-                self.observation_freq,
-                self.visualization_freq,
-                self.reward_freq,
-                self._start_event,
-                self._stop_event,
-                self._control_queue,
-                self._observation_queue,
-                self._request_queue,
-                self._reply_queue,
-            ),
+            args=(worker_conf,),
         )
         self._process.start()
 
