@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
 import robosuite as suite
+from robosuite.utils.log_utils import ROBOSUITE_DEFAULT_LOGGER
 
 if TYPE_CHECKING:
     import mujoco.viewer
@@ -21,8 +22,6 @@ if TYPE_CHECKING:
     from robosuite.renderers.viewer import MjviewerRenderer
     from multiprocessing.context import SpawnProcess
     from multiprocessing.synchronize import Event
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,31 +38,16 @@ class Response:
 
 
 class PeriodicEventGenerator:
-    def __init__(self, frequency: float, start_time: float = 0.0, restart_period: bool = False):
-        assert frequency > 0.0, "Frequency must be strictly positive."
-        assert start_time >= 0.0, "Start time must be non-negative."
-        self.period: float = 1.0 / frequency
-        self.last_event_time: float = start_time - self.period
-        self.restart_period = restart_period
+    def __init__(self, period: float | int, start_time: float | int = 0):
+        assert period > 0, "Period must be strictly positive."
+        self.period = period
+        self.last_event_time = start_time - period
 
-    def is_ready(self, timestamp: float) -> bool:
+    def is_ready(self, timestamp: float | int) -> bool:
         return timestamp >= self.last_event_time + self.period
 
-    def register_event(self, timestamp: float):
-        if not self.is_ready(timestamp):
-            raise ValueError(
-                "PeriodicEventGenerator.register_event() called at an invalid time. "
-                "Call is_ready() first to check if the event is ready to be registered."
-            )
-
-        time_elapsed = timestamp - self.last_event_time
-        assert time_elapsed >= 0.0, "Time elapsed must be non-negative."
-
+    def register_event(self, timestamp: float | int):
         self.last_event_time = timestamp
-
-        # Register this event not to the current time, but to the closest previous multiple of period.
-        if self.restart_period:
-            self.last_event_time -= time_elapsed % self.period
 
 class Queue (MPQueue):
     """
@@ -122,6 +106,7 @@ class SimulationWorker:
     latest_action: np.ndarray
     last_sim_stamp: float
     last_real_stamp: float
+    sim_step_counter: int
 
     def __init__(self, conf: SimulationWorkerConf):
         self.conf = conf
@@ -171,27 +156,46 @@ class SimulationWorker:
         self.latest_action = self.default_action
         self.control_queue.drain()
 
-        # Create periodic event generators.
+        # Get simulation timestep
+        assert self.env.model_timestep is not None
+        assert self.env.model_timestep == self.env.sim.model.opt.timestep
+        sim_timestep = self.env.model_timestep
+
+        # Helper to snap frequency to nearest multiple of sim timestep and compute period in ticks
+        def snap_frequency_to_sim_timestep(freq: float, name: str) -> int:
+            period_seconds = 1.0 / freq
+            period_ticks = round(period_seconds / sim_timestep)
+            snapped_freq = 1.0 / (period_ticks * sim_timestep)
+            if snapped_freq != freq:
+                ROBOSUITE_DEFAULT_LOGGER.warning(
+                    f"{name.capitalize()} frequency {freq:.2f} Hz is not a perfect multiple of "
+                    f"simulation timestep ({sim_timestep}s). Snapping to {snapped_freq:.2f} Hz."
+                )
+            return period_ticks
+
+        # Initialize sim step counter
+        self.sim_step_counter = 0
+
+        # Create periodic event generators with tick-based periods
         self.sync_peg = PeriodicEventGenerator(
-            frequency = self.conf.control_freq,
-            start_time = self.sim_time,
-            restart_period = False,
+            period=snap_frequency_to_sim_timestep(self.conf.control_freq, "control"),
+            start_time=0,
         )
         self.obs_peg = PeriodicEventGenerator(
-            frequency = self.conf.observation_freq,
-            start_time = self.sim_time,
-            restart_period = False,
+            period=snap_frequency_to_sim_timestep(self.conf.observation_freq, "observation"),
+            start_time=0,
         )
         self.reward_peg = PeriodicEventGenerator(
-            frequency = self.conf.reward_freq,
-            start_time = self.sim_time,
-            restart_period = False,
+            period=snap_frequency_to_sim_timestep(self.conf.reward_freq, "reward"),
+            start_time=0,
         )
-        self.viz_peg = PeriodicEventGenerator(
-            frequency = self.conf.visualization_freq,
-            start_time = self.real_time,  # visualization should track real time
-            restart_period = True,  # no need to throttle visualization frequency during delays
-        ) if self.conf.visualization_freq is not None else None
+
+        # Visualization uses wall-clock time (float), not ticks
+        if self.conf.visualization_freq is not None:
+            viz_period = 1.0 / self.conf.visualization_freq
+            self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.real_time)
+        else:
+            self.viz_peg = None
 
         self.observation_queue.publish(observation)
 
@@ -219,7 +223,7 @@ class SimulationWorker:
         observations = self.env.viewer._get_observations() if self.env.viewer_get_obs else self.env._get_observations()
         return observations
 
-    def take_env_step(self):
+    def take_sim_step(self):
         action = self.latest_action.copy()
 
         # The main MuJoCo step
@@ -285,32 +289,33 @@ class SimulationWorker:
                 pass
 
             # Take a step in the environment.
-            self.take_env_step()
+            self.take_sim_step()
+            self.sim_step_counter += 1
 
             # Synchronize sim time with real time if either an observation needs to be produced now
             # or if its time now to periodically sync them.
-            if self.obs_peg.is_ready(self.sim_time) or self.sync_peg.is_ready(self.sim_time):
+            if self.obs_peg.is_ready(self.sim_step_counter) or self.sync_peg.is_ready(self.sim_step_counter):
                 self.sync_time()
-    
+
             # Automatically register the sync event since we always sync time when ready.
-            if self.sync_peg.is_ready(self.sim_time):
-                self.sync_peg.register_event(self.sim_time)
+            if self.sync_peg.is_ready(self.sim_step_counter):
+                self.sync_peg.register_event(self.sim_step_counter)
 
             # Publish observation.
-            if self.obs_peg.is_ready(self.sim_time):
+            if self.obs_peg.is_ready(self.sim_step_counter):
                 observations = self.get_observations()
                 self.observation_queue.publish(observations)
-                self.obs_peg.register_event(self.sim_time)
+                self.obs_peg.register_event(self.sim_step_counter)
 
             # Update the latest action from the control queue.
             if (drained_action := self.control_queue.drain()) is not None:
                 self.latest_action = np.array(drained_action, dtype=np.float32)
 
             # Publish reward.
-            if self.reward_peg.is_ready(self.sim_time):
+            if self.reward_peg.is_ready(self.sim_step_counter):
                 reward = self.compute_reward()
-                self.reward_peg.register_event(self.sim_time)
-            
+                self.reward_peg.register_event(self.sim_step_counter)
+
             # Update visualization.
             curr_real_time = self.real_time
             if self.viz_peg is not None and self.viz_peg.is_ready(curr_real_time):
