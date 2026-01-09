@@ -53,6 +53,7 @@ dev = [
   "pytest>=8.4.2",
   "ruff>=0.14.7",
   "ty>=0.0.1a29",
+  "tyro>=1.0.3",
 ]
 
 [build-system]

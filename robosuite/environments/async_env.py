@@ -666,6 +666,9 @@ def make_async(
     *args,
     control_freq: float = 50.0,
     observation_freq: float = 30.0,
+    viz_freq: Optional[float] = 30.0,
+    real_time_rate_freq: float = 5.0,
+    target_real_time_rate: float = 1.0,
     history: int = 1,
     **kwargs,
 ) -> AsyncSimulation:
@@ -676,6 +679,9 @@ def make_async(
         *args: Additional arguments to pass to the specific environment class initializer
         control_freq (float): The frequency of the control stream in Hz.
         observation_freq (float): The frequency of the observation stream in Hz.
+        viz_freq (Optional[float]): The frequency of the visualization stream in Hz.
+        real_time_rate_freq (float): The frequency of the real-time rate updates in Hz.
+        target_real_time_rate (float): The target real-time rate of the simulation.
         history (int): The number of steps to store in the observation stream.
         **kwargs: Additional arguments to pass to the specific environment class initializer
     Returns:
@@ -692,5 +698,8 @@ def make_async(
         ),
         control_freq = control_freq,
         observation_freq = observation_freq,
+        visualization_freq = viz_freq,
+        real_time_rate_freq = real_time_rate_freq,
+        target_real_time_rate = target_real_time_rate,
         history = history,
     )
