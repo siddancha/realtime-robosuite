@@ -31,6 +31,7 @@ def test_async_simulation_stops_when_episode_done():
         use_camera_obs=False,
         control_freq=15.0,
         observation_freq=15.0,
+        horizon=3.0,  # short horizon to trigger done quickly
     )
     try:
         sim.start()

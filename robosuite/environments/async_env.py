@@ -24,6 +24,15 @@ if TYPE_CHECKING:
     from multiprocessing.synchronize import Event
 
 
+@dataclass
+class Observation:
+    """Observation produced by the asynchronous simulation."""
+    data: OrderedDict
+    time: float
+    action: np.ndarray
+    done: bool
+
+
 @dataclass(frozen=True)
 class Request:
     command: str
@@ -151,9 +160,19 @@ class SimulationWorker:
     def reset(self):
         self.env.initialize_time(self.conf.control_freq)
 
-        observation = self.env.reset()
-        self.observation_queue.drain()
+        # Reset latest action to default
         self.latest_action = self.default_action
+
+        # Reset environment and create initial observation
+        observation = Observation(
+            data=self.env.reset(),
+            time=self.sim_time,
+            action=self.latest_action.copy(),
+            done=False,
+        )
+
+        # Drain queues
+        self.observation_queue.drain()
         self.control_queue.drain()
 
         # Get simulation timestep
@@ -219,9 +238,14 @@ class SimulationWorker:
         reward, _, _ = self.env._post_action(action)
         return reward
 
-    def get_observations(self):
-        observations = self.env.viewer._get_observations() if self.env.viewer_get_obs else self.env._get_observations()
-        return observations
+    def get_observations(self) -> Observation:
+        obs_data = self.env.viewer._get_observations() if self.env.viewer_get_obs else self.env._get_observations()
+        return Observation(
+            data=obs_data,
+            time=self.sim_time,
+            action=self.latest_action.copy(),
+            done=self.sim_time >= self.env.horizon,
+        )
 
     def take_sim_step(self):
         action = self.latest_action.copy()
@@ -276,7 +300,8 @@ class SimulationWorker:
         self.update_timestamps()
 
         # Main worker loop
-        while not self.conf.stop_event.is_set():
+        # Note that the horizon is interpreted as seconds of simulation time
+        while not self.conf.stop_event.is_set() and self.sim_time <= self.env.horizon:
             # Check for requests from the parent process.
             try:
                 # Requests are blocking until there is a reply on thr reply queue.
@@ -342,7 +367,7 @@ class ObservationStream:
         self._history = deque(maxlen=history)
         self._lock = threading.Lock()
 
-    def _drain(self, block: bool, timeout: Optional[float]) -> Optional[np.ndarray]:
+    def _drain(self, block: bool, timeout: Optional[float]) -> Optional[Observation]:
         first = True
         while True:
             try:
@@ -362,14 +387,14 @@ class ObservationStream:
         with self._lock:
             return self._history[-1] if self._history else None
 
-    def latest(self) -> Optional[np.ndarray]:
+    def latest(self) -> Optional[Observation]:
         """
         Returns the latest observation without blocking.
         If the queue is empty, returns None.
         """
         return self._drain(block=False, timeout=None)
 
-    def get(self, timeout: Optional[float] = None) -> np.ndarray:
+    def get(self, timeout: Optional[float] = None) -> Observation:
         """
         Returns the latest observation with blocking.
         If the queue is empty, waits for the observation to be available.
@@ -379,7 +404,7 @@ class ObservationStream:
             raise TimeoutError("Timed out while waiting for observation.")
         return result
 
-    def snapshot(self) -> Sequence[np.ndarray]:
+    def snapshot(self) -> Sequence[Observation]:
         self._drain(block=False, timeout=None)
         with self._lock:
             return tuple(self._history)
@@ -569,7 +594,7 @@ class AsyncSimulation:
     def is_running(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
-    def latest_observation(self) -> Optional[np.ndarray]:
+    def latest_observation(self) -> Optional[Observation]:
         return self.observation_stream.latest()
 
     def __enter__(self):

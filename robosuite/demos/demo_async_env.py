@@ -29,16 +29,19 @@ def main(
       has_renderer=True,
       has_offscreen_renderer=False,
       use_camera_obs=False,
+      horizon=10.0,  # seconds of simulation time
       control_freq=50.0,     # new parameter
       observation_freq=30.0,  # new parameter
   )
 
     env.start()
 
-    done = False    
+    done = False
     while not done:
         action = rng.uniform(0, 1, size=env.action_dim)
         env.control_stream.push(action)
+        obs = env.latest_observation()
+        done = obs.done if obs is not None else False
 
     env.close()
 
