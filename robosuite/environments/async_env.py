@@ -296,9 +296,9 @@ class SimulationWorker:
             # or if its time now to periodically sync them.
             if self.obs_peg.is_ready(self.sim_step_counter) or self.sync_peg.is_ready(self.sim_step_counter):
                 self.sync_time()
-
-            # Automatically register the sync event since we always sync time when ready.
-            if self.sync_peg.is_ready(self.sim_step_counter):
+                # We register the sync event every time we call sync_time() even if it wasn't triggered
+                # by the sync_peg. This resets the sync interval, but still maintains the guarantee that
+                # control will be executed in simulation with a delay of no more than 1/control_freq.
                 self.sync_peg.register_event(self.sim_step_counter)
 
             # Publish observation.
