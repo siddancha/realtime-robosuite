@@ -26,19 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class StepResult:
-    """
-    Container for data produced by a single control step of the simulation.
-    """
-    observation: OrderedDict[str, np.ndarray]
-    reward: float
-    done: bool
-    info: Dict[str, Any]
-    action: np.ndarray
-    timestamp: float
-
-
-@dataclass(frozen=True)
 class Request:
     command: str
     payload: Any = None
@@ -206,15 +193,7 @@ class SimulationWorker:
             restart_period = True,  # no need to throttle visualization frequency during delays
         ) if self.conf.visualization_freq is not None else None
 
-        step_result = StepResult(
-            observation=observation,
-            reward=0.0,
-            done=False,
-            info={"reset": True},
-            action=self.latest_action.copy(),
-            timestamp=self.sim_time,
-        )
-        self.observation_queue.publish(step_result)
+        self.observation_queue.publish(observation)
 
     def handle_request(self, request: Request):
         assert isinstance(request, Request), f"Expected Request, got {type(request)}"
@@ -231,17 +210,29 @@ class SimulationWorker:
         else:
             raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
 
-    def take_env_step(self) -> StepResult:
-        observation, reward, done, info = self.env.step(self.latest_action.copy())
+    def compute_reward(self) -> float:
+        action = self.latest_action.copy()
+        reward, _, _ = self.env._post_action(action)
+        return reward
 
-        return StepResult(
-            observation=observation,
-            reward=reward,
-            done=done,
-            info=info,
-            action=self.latest_action.copy(),
-            timestamp=self.real_time,
-        )
+    def get_observations(self):
+        observations = self.env.viewer._get_observations() if self.env.viewer_get_obs else self.env._get_observations()
+        return observations
+
+    def take_env_step(self):
+        action = self.latest_action.copy()
+
+        # The main MuJoCo step
+        if self.env.lite_physics:
+            self.env.sim.step1()
+        else:
+            self.env.sim.forward()
+        self.env._pre_action(action)
+        if self.env.lite_physics:
+            self.env.sim.step2()
+        else:
+            self.env.sim.step()
+        self.env._update_observables()
 
     def update_timestamps(self):
         self.last_sim_stamp = self.sim_time
@@ -258,19 +249,21 @@ class SimulationWorker:
 
         self.update_timestamps()
 
-    def update_viz(self):
-        renderer: MjviewerRenderer | None = getattr(self.env, "viewer", None)
-        if renderer is None:
+    def update_viewer(self):
+        if not self.env.renderer:
             return
-        viewer_handle: mujoco.viewer.Handle = renderer.viewer
 
-        # Render the environment
-        renderer.render()
+        if self.env.renderer == "mjviewer" and self.env.viewer is None:
+            # need to launch again after it was destroyed
+            self.env.initialize_renderer()
+
+        if self.env.renderer == "mujoco" or self.env.renderer == "mjviewer":
+            self.env.viewer.update()
 
         # Add overlays to the visualizer
         # TODO (Sid): compute real time rate
         observed_rtr = 1.0
-        viewer_handle.set_texts([
+        self.env.viewer.viewer.set_texts([
             (None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "Async. simulation time", f"{self.sim_time:.3f}s"),
             (None, mujoco.mjtGridPos.mjGRID_TOPRIGHT, "Real-time rate", f"{observed_rtr:.3f}")
         ])
@@ -279,7 +272,7 @@ class SimulationWorker:
         self.update_timestamps()
 
         # Main worker loop
-        while True:
+        while not self.conf.stop_event.is_set():
             # Check for requests from the parent process.
             try:
                 # Requests are blocking until there is a reply on thr reply queue.
@@ -291,12 +284,8 @@ class SimulationWorker:
             except queue.Empty:
                 pass
 
-            # Stop running the loop if the stop event is set.
-            if self.conf.stop_event.is_set():
-                break
-
             # Take a step in the environment.
-            step_result = self.take_env_step()
+            self.take_env_step()
 
             # Synchronize sim time with real time if either an observation needs to be produced now
             # or if its time now to periodically sync them.
@@ -309,22 +298,24 @@ class SimulationWorker:
 
             # Publish observation.
             if self.obs_peg.is_ready(self.sim_time):
-                self.observation_queue.publish(step_result)
+                observations = self.get_observations()
+                self.observation_queue.publish(observations)
                 self.obs_peg.register_event(self.sim_time)
 
             # Update the latest action from the control queue.
             if (drained_action := self.control_queue.drain()) is not None:
                 self.latest_action = np.array(drained_action, dtype=np.float32)
 
+            # Publish reward.
+            if self.reward_peg.is_ready(self.sim_time):
+                reward = self.compute_reward()
+                self.reward_peg.register_event(self.sim_time)
+            
             # Update visualization.
             curr_real_time = self.real_time
             if self.viz_peg is not None and self.viz_peg.is_ready(curr_real_time):
-                self.update_viz()
+                self.update_viewer()
                 self.viz_peg.register_event(curr_real_time)
-
-            if step_result.done:
-                self.observation_queue.publish(step_result)
-                break
 
         self.env.close()
 
@@ -346,7 +337,7 @@ class ObservationStream:
         self._history = deque(maxlen=history)
         self._lock = threading.Lock()
 
-    def _drain(self, block: bool, timeout: Optional[float]) -> Optional[StepResult]:
+    def _drain(self, block: bool, timeout: Optional[float]) -> Optional[np.ndarray]:
         first = True
         while True:
             try:
@@ -366,24 +357,24 @@ class ObservationStream:
         with self._lock:
             return self._history[-1] if self._history else None
 
-    def latest(self) -> Optional[StepResult]:
+    def latest(self) -> Optional[np.ndarray]:
         """
-        Returns the latest step without blocking.
+        Returns the latest observation without blocking.
         If the queue is empty, returns None.
         """
         return self._drain(block=False, timeout=None)
 
-    def get(self, timeout: Optional[float] = None) -> StepResult:
+    def get(self, timeout: Optional[float] = None) -> np.ndarray:
         """
-        Returns the latest step with blocking.
-        If the queue is empty, waits for the step to be available.
+        Returns the latest observation with blocking.
+        If the queue is empty, waits for the observation to be available.
         """
         result = self._drain(block=True, timeout=timeout)
         if result is None:
             raise TimeoutError("Timed out while waiting for observation.")
         return result
 
-    def snapshot(self) -> Sequence[StepResult]:
+    def snapshot(self) -> Sequence[np.ndarray]:
         self._drain(block=False, timeout=None)
         with self._lock:
             return tuple(self._history)
@@ -573,7 +564,7 @@ class AsyncSimulation:
     def is_running(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
-    def latest_step(self) -> Optional[StepResult]:
+    def latest_observation(self) -> Optional[np.ndarray]:
         return self.observation_stream.latest()
 
     def __enter__(self):
@@ -593,7 +584,7 @@ def make_async(
     **kwargs,
 ) -> AsyncSimulation:
     """
-    Instantiates an asynchronous simluation of a robosuite environment.
+    Instantiates an asynchronous simulation of a robosuite environment.
     Args:
         env_name (str): Name of the robosuite environment to initialize
         *args: Additional arguments to pass to the specific environment class initializer
@@ -605,7 +596,14 @@ def make_async(
         AsyncSimulation: Asynchronous simulation of the robosuite environment.
     """
     return AsyncSimulation(
-        env_factory = partial(suite.make, env_name, *args, control_freq = control_freq, **kwargs),
+        env_factory = partial(
+            suite.make,
+            env_name,
+            *args,
+            control_freq = control_freq,
+            **kwargs,
+            ignore_done = True,  # always ignore done
+        ),
         control_freq = control_freq,
         observation_freq = observation_freq,
         history = history,
