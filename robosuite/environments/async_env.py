@@ -113,6 +113,7 @@ class SimulationWorker:
     reward_peg: PeriodicEventGenerator
     viz_peg: Optional[PeriodicEventGenerator]
     latest_action: np.ndarray
+    is_action_new: bool
     last_sim_stamp: float
     last_real_stamp: float
     sim_step_counter: int
@@ -162,6 +163,7 @@ class SimulationWorker:
 
         # Reset latest action to default
         self.latest_action = self.default_action
+        self.is_action_new = True
 
         # Reset environment and create initial observation
         observation = Observation(
@@ -253,7 +255,7 @@ class SimulationWorker:
             self.env.sim.step1()
         else:
             self.env.sim.forward()
-        self.env._pre_action(action)
+        self.env._pre_action(action, policy_step=self.is_action_new)
         if self.env.lite_physics:
             self.env.sim.step2()
         else:
@@ -311,9 +313,15 @@ class SimulationWorker:
             except queue.Empty:
                 pass
 
+            # Update the latest action from the control queue.
+            if (drained_action := self.control_queue.drain()) is not None:
+                self.latest_action = np.array(drained_action, dtype=np.float32)
+                self.is_action_new = True
+
             # Take a step in the environment.
             self.take_sim_step()
             self.sim_step_counter += 1
+            self.is_action_new = False
 
             # Synchronize sim time with real time if either an observation needs to be produced now
             # or if its time now to periodically sync them.
@@ -329,10 +337,6 @@ class SimulationWorker:
                 observations = self.get_observations()
                 self.observation_queue.publish(observations)
                 self.obs_peg.register_event(self.sim_step_counter)
-
-            # Update the latest action from the control queue.
-            if (drained_action := self.control_queue.drain()) is not None:
-                self.latest_action = np.array(drained_action, dtype=np.float32)
 
             # Publish reward.
             if self.reward_peg.is_ready(self.sim_step_counter):

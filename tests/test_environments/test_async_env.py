@@ -14,6 +14,7 @@ def test_async_simulation_runs_and_uses_latest_action():
         has_renderer=False,
         has_offscreen_renderer=False,
         use_camera_obs=False,
+        horizon=2.0,  # seconds in simulation time
         control_freq=20.0,
         observation_freq=10.0,
     )
@@ -31,9 +32,9 @@ def test_async_simulation_runs_and_uses_latest_action():
 
         deadline = time.time() + 1.5
         next_obs = None
-        while time.time() < deadline:
-            remaining = max(0.0, deadline - time.time())
-            next_obs = sim.observation_stream.get(timeout=remaining or 0.05)
+        while not sim.done():
+            remaining = deadline - time.time()
+            next_obs = sim.observation_stream.get(timeout=remaining if remaining > 0 else 0.05)
             if np.allclose(next_obs.action, new_action, atol=1e-6):
                 break
         assert next_obs is not None and np.allclose(next_obs.action, new_action, atol=1e-6)

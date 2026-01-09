@@ -38,7 +38,7 @@ def main(
 
     while not env.done():
         action = rng.uniform(0, 1, size=env.action_dim)
-        env.control_stream.push(action)
+        env.control_stream.push(action)  # delta actions
 
     env.stop()
 

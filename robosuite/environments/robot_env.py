@@ -563,7 +563,7 @@ class RobotEnv(MujocoEnv):
 
     def _pre_action(self, action, policy_step=False):
         """
-        Overrides the superclass method to control the robot(s) within this enviornment using their respective
+        Overrides the superclass method to control the robot(s) within this environment using their respective
         controllers using the passed actions and gripper control.
 
         Args:
