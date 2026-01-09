@@ -99,6 +99,7 @@ class SimulationWorkerConf:
     reward_freq: float
     start_event: Event
     stop_event: Event
+    done_event: Event
     control_queue: Queue
     observation_queue: Queue
     request_queue: Queue
@@ -228,9 +229,6 @@ class SimulationWorker:
             self.reply_queue.put(Response(command=command, payload=None))
         elif command == "get_action_dim":
             self.reply_queue.put(Response(command=command, payload=self.env.action_dim))
-        elif command == "is_done":
-            is_done = self.sim_time >= self.env.horizon
-            self.reply_queue.put(Response(command=command, payload=is_done))
         else:
             raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
 
@@ -301,7 +299,7 @@ class SimulationWorker:
 
         # Main worker loop
         # Note that the horizon is interpreted as seconds of simulation time
-        while not self.conf.stop_event.is_set() and self.sim_time <= self.env.horizon:
+        while not self.conf.stop_event.is_set() and not self.conf.done_event.is_set():
             # Check for requests from the parent process.
             try:
                 # Requests are blocking until there is a reply on thr reply queue.
@@ -346,6 +344,10 @@ class SimulationWorker:
             if self.viz_peg is not None and self.viz_peg.is_ready(curr_real_time):
                 self.update_viewer()
                 self.viz_peg.register_event(curr_real_time)
+
+            # Check if simulation time horizon has been reached.
+            if self.sim_time >= self.env.horizon:
+                self.conf.done_event.set()
 
         self.env.close()
 
@@ -483,6 +485,7 @@ class AsyncSimulation:
         self._ctx = ctx or mp.get_context("spawn")
         self._start_event = self._ctx.Event()
         self._stop_event = self._ctx.Event()
+        self._done_event = self._ctx.Event()
         self._control_queue = Queue(maxsize=8, ctx=self._ctx)
         self._observation_queue = Queue(maxsize=max(1, history), ctx=self._ctx)
         self._request_queue = Queue(maxsize=1, ctx=self._ctx)
@@ -501,6 +504,7 @@ class AsyncSimulation:
             reward_freq,
             self._start_event,
             self._stop_event,
+            self._done_event,
             self._control_queue,
             self._observation_queue,
             self._request_queue,
@@ -513,6 +517,7 @@ class AsyncSimulation:
 
         self._start_event.clear()
         self._stop_event.clear()
+        self._done_event.clear()
 
         self._process = self._ctx.Process(
             target=SimulationWorker.runner,
@@ -592,11 +597,7 @@ class AsyncSimulation:
         return int(result)
 
     def done(self) -> bool:
-        """Returns True if the simulation has reached the horizon."""
-        if not self.is_running():
-            raise RuntimeError("AsyncSimulation is not running.")
-        result = self._send_request("is_done", timeout=2.0)
-        return bool(result)
+        return self._done_event.is_set()
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.is_alive()
