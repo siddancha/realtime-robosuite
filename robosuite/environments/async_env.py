@@ -57,6 +57,27 @@ class PeriodicEventGenerator:
     def register_event(self, timestamp: float | int):
         self.last_event_time = timestamp
 
+
+class RealTimeRateMeter:
+    """Estimates the real-time rate of a simulation over wall-clock time windows."""
+
+    def __init__(self, real_time: float, sim_time: float):
+        self._window_start_real_time = real_time
+        self._window_start_sim_time = sim_time
+        self.rate: float = 1.0
+
+    def update(self, real_time: float, sim_time: float):
+        """Update RTR estimate based on elapsed time since last update."""
+        real_elapsed = real_time - self._window_start_real_time
+        sim_elapsed = sim_time - self._window_start_sim_time
+
+        if real_elapsed > 0:
+            self.rate = sim_elapsed / real_elapsed
+
+        self._window_start_real_time = real_time
+        self._window_start_sim_time = sim_time
+
+
 class Queue (MPQueue):
     """
     Multiprocessing queue that supports drop-oldest publish and draining the latest item.
@@ -95,6 +116,7 @@ class SimulationWorkerConf:
     control_freq: float
     observation_freq: float
     visualization_freq: Optional[float]
+    real_time_rate_freq: Optional[float]
     target_real_time_rate: float
     reward_freq: float
     start_event: Event
@@ -112,6 +134,8 @@ class SimulationWorker:
     obs_peg: PeriodicEventGenerator
     reward_peg: PeriodicEventGenerator
     viz_peg: Optional[PeriodicEventGenerator]
+    rtr_peg: Optional[PeriodicEventGenerator]
+    rtr_meter: Optional[RealTimeRateMeter]
     latest_action: np.ndarray
     is_action_new: bool
     last_sim_stamp: float
@@ -217,6 +241,18 @@ class SimulationWorker:
         else:
             self.viz_peg = None
 
+        # RTR meter uses wall-clock time (float), only if visualization is enabled
+        if self.conf.real_time_rate_freq is not None:
+            if self.conf.visualization_freq is None:
+                raise ValueError("real_time_rate_freq can only be set if visualization_freq is also set.")
+            rtr_period = 1.0 / self.conf.real_time_rate_freq
+            curr_real_time = self.real_time
+            self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=curr_real_time)
+            self.rtr_meter = RealTimeRateMeter(curr_real_time, self.sim_time)
+        else:
+            self.rtr_peg = None
+            self.rtr_meter = None
+
         self.observation_queue.publish(observation)
 
     def handle_request(self, request: Request):
@@ -289,8 +325,7 @@ class SimulationWorker:
             self.env.viewer.update()
 
         # Add overlays to the visualizer
-        # TODO (Sid): compute real time rate
-        observed_rtr = 1.0
+        observed_rtr = self.rtr_meter.rate
         self.env.viewer.viewer.set_texts([
             (None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "Async. simulation time", f"{self.sim_time:.3f}s"),
             (None, mujoco.mjtGridPos.mjGRID_TOPRIGHT, "Real-time rate", f"{observed_rtr:.3f}")
@@ -343,8 +378,15 @@ class SimulationWorker:
                 reward = self.compute_reward()
                 self.reward_peg.register_event(self.sim_step_counter)
 
-            # Update visualization.
+            # Get current real time.
             curr_real_time = self.real_time
+
+            # Update real-time rate meter.
+            if self.rtr_peg is not None and self.rtr_peg.is_ready(curr_real_time):
+                self.rtr_meter.update(curr_real_time, self.sim_time)
+                self.rtr_peg.register_event(curr_real_time)
+
+            # Update visualization.
             if self.viz_peg is not None and self.viz_peg.is_ready(curr_real_time):
                 self.update_viewer()
                 self.viz_peg.register_event(curr_real_time)
@@ -476,6 +518,7 @@ class AsyncSimulation:
         control_freq: float = 50.0,
         observation_freq: float = 30.0,
         visualization_freq: Optional[float] = 30.0,
+        real_time_rate_freq: float = 5.0,
         target_real_time_rate: float = 1.0,
         reward_freq: float = 10.0,
         history: int = 1,
@@ -504,6 +547,7 @@ class AsyncSimulation:
             control_freq,
             observation_freq,
             visualization_freq,
+            real_time_rate_freq,
             target_real_time_rate,
             reward_freq,
             self._start_event,
