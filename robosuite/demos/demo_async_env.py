@@ -36,14 +36,11 @@ def main(
 
     env.start()
 
-    done = False
-    while not done:
+    while not env.done():
         action = rng.uniform(0, 1, size=env.action_dim)
         env.control_stream.push(action)
-        obs = env.latest_observation()
-        done = obs.done if obs is not None else False
 
-    env.close()
+    env.stop()
 
 
 if __name__ == "__main__":

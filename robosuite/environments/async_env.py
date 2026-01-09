@@ -30,7 +30,6 @@ class Observation:
     data: OrderedDict
     time: float
     action: np.ndarray
-    done: bool
 
 
 @dataclass(frozen=True)
@@ -168,7 +167,6 @@ class SimulationWorker:
             data=self.env.reset(),
             time=self.sim_time,
             action=self.latest_action.copy(),
-            done=False,
         )
 
         # Drain queues
@@ -230,6 +228,9 @@ class SimulationWorker:
             self.reply_queue.put(Response(command=command, payload=None))
         elif command == "get_action_dim":
             self.reply_queue.put(Response(command=command, payload=self.env.action_dim))
+        elif command == "is_done":
+            is_done = self.sim_time >= self.env.horizon
+            self.reply_queue.put(Response(command=command, payload=is_done))
         else:
             raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
 
@@ -244,7 +245,6 @@ class SimulationWorker:
             data=obs_data,
             time=self.sim_time,
             action=self.latest_action.copy(),
-            done=self.sim_time >= self.env.horizon,
         )
 
     def take_sim_step(self):
@@ -590,6 +590,13 @@ class AsyncSimulation:
             raise RuntimeError("AsyncSimulation must be running to query action_dim.")
         result = self._send_request("get_action_dim", timeout=2.0)
         return int(result)
+
+    def done(self) -> bool:
+        """Returns True if the simulation has reached the horizon."""
+        if not self.is_running():
+            raise RuntimeError("AsyncSimulation is not running.")
+        result = self._send_request("is_done", timeout=2.0)
+        return bool(result)
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.is_alive()
