@@ -444,7 +444,7 @@ class AsyncSimulation:
         env_factory: Callable[[], MujocoEnv],
         control_freq: float = 50.0,
         observation_freq: float = 30.0,
-        visualization_freq: Optional[float] = 20.0,
+        visualization_freq: Optional[float] = 30.0,
         target_real_time_rate: float = 1.0,
         reward_freq: float = 10.0,
         history: int = 1,

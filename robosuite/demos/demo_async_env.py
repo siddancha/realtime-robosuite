@@ -29,7 +29,7 @@ def main(
       has_renderer=True,
       has_offscreen_renderer=False,
       use_camera_obs=False,
-      control_freq=100.0,     # new parameter
+      control_freq=50.0,     # new parameter
       observation_freq=30.0,  # new parameter
   )
 
