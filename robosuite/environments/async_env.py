@@ -138,8 +138,8 @@ class SimulationWorker:
     rtr_meter: Optional[RealTimeRateMeter]
     latest_action: np.ndarray
     is_action_new: bool
-    last_sim_stamp: float
-    last_real_stamp: float
+    anchor_sim_time: float
+    anchor_real_time: float
     sim_step_counter: int
 
     def __init__(self, conf: SimulationWorkerConf):
@@ -255,6 +255,10 @@ class SimulationWorker:
 
         self.observation_queue.publish(observation)
 
+        # Initialize time anchors for absolute time tracking (used by sync_time)
+        self.anchor_sim_time = self.sim_time
+        self.anchor_real_time = self.real_time
+
     def handle_request(self, request: Request):
         assert isinstance(request, Request), f"Expected Request, got {type(request)}"
         command = request.command
@@ -298,20 +302,15 @@ class SimulationWorker:
             self.env.sim.step()
         self.env._update_observables()
 
-    def update_timestamps(self):
-        self.last_sim_stamp = self.sim_time
-        self.last_real_stamp = self.real_time
-
     def sync_time(self):
-        real_duration = self.real_time - self.last_real_stamp
-        sim_duration = self.sim_time - self.last_sim_stamp
+        # Calculate target real time based on anchor
+        sim_elapsed = self.sim_time - self.anchor_sim_time
+        real_elapsed = self.real_time - self.anchor_real_time
+        target_real_elapsed = sim_elapsed / self.conf.target_real_time_rate
 
-        # Sleep to catch up with simulation time
-        target_real_duration = sim_duration / self.conf.target_real_time_rate
-        if target_real_duration >= real_duration:
-            time.sleep(target_real_duration - real_duration)
-
-        self.update_timestamps()
+        # Sleep until target time
+        if target_real_elapsed > real_elapsed:
+            time.sleep(target_real_elapsed - real_elapsed)
 
     def update_viewer(self):
         if not self.env.renderer:
@@ -332,8 +331,6 @@ class SimulationWorker:
         ])
 
     def main_loop(self):
-        self.update_timestamps()
-
         # Main worker loop
         # Note that the horizon is interpreted as seconds of simulation time
         while not self.conf.stop_event.is_set() and not self.conf.done_event.is_set():
