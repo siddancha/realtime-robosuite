@@ -163,7 +163,6 @@ class SimulationWorker:
     def sim_time(self) -> float:
         return float(self.env.sim.data.time)
 
-    @property
     def real_time(self) -> float:
         return time.perf_counter()
 
@@ -238,7 +237,7 @@ class SimulationWorker:
         # Visualization uses wall-clock time (float), not ticks
         if self.conf.visualization_freq is not None:
             viz_period = 1.0 / self.conf.visualization_freq
-            self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.real_time)
+            self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.real_time())
         else:
             self.viz_peg = None
 
@@ -297,7 +296,7 @@ class SimulationWorker:
         Also initializes the RTR meter and peg to the same anchors.
         """
         self.anchor_sim_time = self.sim_time
-        self.anchor_real_time = self.real_time
+        self.anchor_real_time = self.real_time()
 
         # RTR meter uses wall-clock time (float), only if visualization is enabled
         rtr_period = 1.0 / self.conf.real_time_rate_freq
@@ -307,7 +306,7 @@ class SimulationWorker:
     def sync_time(self):
         # Calculate target real time based on anchor
         sim_elapsed = self.sim_time - self.anchor_sim_time
-        real_elapsed = self.real_time - self.anchor_real_time
+        real_elapsed = self.real_time() - self.anchor_real_time
         target_real_elapsed = sim_elapsed / self.conf.target_real_time_rate
 
         # Sleep until target time
@@ -381,7 +380,7 @@ class SimulationWorker:
                 self.reward_peg.register_event(self.sim_step_counter)
 
             # Get current real time.
-            curr_real_time = self.real_time
+            curr_real_time = self.real_time()
 
             # Update real-time rate meter.
             if self.viz_peg and self.rtr_peg.is_ready(curr_real_time):
