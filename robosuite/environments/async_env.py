@@ -61,14 +61,10 @@ class PeriodicEventGenerator:
 class RealTimeRateMeter:
     """Estimates the real-time rate of a simulation over wall-clock time windows."""
 
-    def __init__(self):
-        self._anchor_real_time = 0
-        self._anchor_sim_time = 0
-        self.rate: float = 1.0
-
-    def set_anchor_timestamps(self, real_time: float, sim_time: float):
+    def __init__(self, real_time: float, sim_time: float):
         self._anchor_real_time = real_time
         self._anchor_sim_time = sim_time
+        self.rate: float = 1.0
 
     def update(self, real_time: float, sim_time: float):
         """Update RTR estimate based on elapsed time since last update."""
@@ -79,7 +75,8 @@ class RealTimeRateMeter:
             self.rate = sim_elapsed / real_elapsed
 
         # Reset anchor timestamps at every update
-        self.set_anchor_timestamps(real_time, sim_time)
+        self._anchor_real_time = real_time
+        self._anchor_sim_time = sim_time
 
 
 class Queue (MPQueue):
@@ -120,7 +117,7 @@ class SimulationWorkerConf:
     control_freq: float
     observation_freq: float
     visualization_freq: Optional[float]
-    real_time_rate_freq: Optional[float]
+    real_time_rate_freq: float
     target_real_time_rate: float
     reward_freq: float
     start_event: Event
@@ -138,8 +135,8 @@ class SimulationWorker:
     obs_peg: PeriodicEventGenerator
     reward_peg: PeriodicEventGenerator
     viz_peg: Optional[PeriodicEventGenerator]
-    rtr_peg: Optional[PeriodicEventGenerator]
-    rtr_meter: Optional[RealTimeRateMeter]
+    rtr_peg: PeriodicEventGenerator
+    rtr_meter: RealTimeRateMeter
     latest_action: np.ndarray
     is_action_new: bool
     anchor_sim_time: float
@@ -245,20 +242,10 @@ class SimulationWorker:
         else:
             self.viz_peg = None
 
-        # RTR meter uses wall-clock time (float), only if visualization is enabled
-        if self.conf.real_time_rate_freq is not None:
-            if self.conf.visualization_freq is None:
-                raise ValueError("real_time_rate_freq can only be set if visualization_freq is also set.")
-            rtr_period = 1.0 / self.conf.real_time_rate_freq
-            self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=0)
-            self.rtr_meter = RealTimeRateMeter()
-        else:
-            self.rtr_peg = None
-            self.rtr_meter = None
-
         self.observation_queue.publish(observation)
 
         # Initialize time anchors for absolute time tracking (used by sync_time)
+        # Also create RTR meter and peg
         self.set_anchor_timestamps()
 
     def handle_request(self, request: Request):
@@ -305,15 +292,17 @@ class SimulationWorker:
         self.env._update_observables()
 
     def set_anchor_timestamps(self):
-        """Set anchor timestamps for absolute time tracking."""
+        """
+        Set anchor timestamps for absolute time tracking.
+        Also initializes the RTR meter and peg to the same anchors.
+        """
         self.anchor_sim_time = self.sim_time
         self.anchor_real_time = self.real_time
 
-        # Also update the anchors used by the real time rate meter and peg
-        if self.rtr_peg is not None:
-            self.rtr_peg.last_event_time = self.anchor_real_time
-        if self.rtr_meter is not None:
-            self.rtr_meter.set_anchor_timestamps(self.anchor_real_time, self.anchor_sim_time)
+        # RTR meter uses wall-clock time (float), only if visualization is enabled
+        rtr_period = 1.0 / self.conf.real_time_rate_freq
+        self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=self.anchor_real_time)
+        self.rtr_meter = RealTimeRateMeter(self.anchor_real_time, self.anchor_sim_time)
 
     def sync_time(self):
         # Calculate target real time based on anchor
@@ -395,12 +384,12 @@ class SimulationWorker:
             curr_real_time = self.real_time
 
             # Update real-time rate meter.
-            if self.rtr_peg is not None and self.rtr_peg.is_ready(curr_real_time):
+            if self.viz_peg and self.rtr_peg.is_ready(curr_real_time):
                 self.rtr_meter.update(curr_real_time, self.sim_time)
                 self.rtr_peg.register_event(curr_real_time)
 
             # Update visualization.
-            if self.viz_peg is not None and self.viz_peg.is_ready(curr_real_time):
+            if self.viz_peg and self.viz_peg.is_ready(curr_real_time):
                 self.update_viewer()
                 self.viz_peg.register_event(curr_real_time)
 
