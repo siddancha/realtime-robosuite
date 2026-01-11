@@ -61,21 +61,25 @@ class PeriodicEventGenerator:
 class RealTimeRateMeter:
     """Estimates the real-time rate of a simulation over wall-clock time windows."""
 
-    def __init__(self, real_time: float, sim_time: float):
-        self._window_start_real_time = real_time
-        self._window_start_sim_time = sim_time
+    def __init__(self):
+        self._anchor_real_time = 0
+        self._anchor_sim_time = 0
         self.rate: float = 1.0
+
+    def set_anchor_timestamps(self, real_time: float, sim_time: float):
+        self._anchor_real_time = real_time
+        self._anchor_sim_time = sim_time
 
     def update(self, real_time: float, sim_time: float):
         """Update RTR estimate based on elapsed time since last update."""
-        real_elapsed = real_time - self._window_start_real_time
-        sim_elapsed = sim_time - self._window_start_sim_time
+        real_elapsed = real_time - self._anchor_real_time
+        sim_elapsed = sim_time - self._anchor_sim_time
 
         if real_elapsed > 0:
             self.rate = sim_elapsed / real_elapsed
 
-        self._window_start_real_time = real_time
-        self._window_start_sim_time = sim_time
+        # Reset anchor timestamps at every update
+        self.set_anchor_timestamps(real_time, sim_time)
 
 
 class Queue (MPQueue):
@@ -246,9 +250,8 @@ class SimulationWorker:
             if self.conf.visualization_freq is None:
                 raise ValueError("real_time_rate_freq can only be set if visualization_freq is also set.")
             rtr_period = 1.0 / self.conf.real_time_rate_freq
-            curr_real_time = self.real_time
-            self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=curr_real_time)
-            self.rtr_meter = RealTimeRateMeter(curr_real_time, self.sim_time)
+            self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=0)
+            self.rtr_meter = RealTimeRateMeter()
         else:
             self.rtr_peg = None
             self.rtr_meter = None
@@ -256,8 +259,7 @@ class SimulationWorker:
         self.observation_queue.publish(observation)
 
         # Initialize time anchors for absolute time tracking (used by sync_time)
-        self.anchor_sim_time = self.sim_time
-        self.anchor_real_time = self.real_time
+        self.set_anchor_timestamps()
 
     def handle_request(self, request: Request):
         assert isinstance(request, Request), f"Expected Request, got {type(request)}"
@@ -302,6 +304,17 @@ class SimulationWorker:
             self.env.sim.step()
         self.env._update_observables()
 
+    def set_anchor_timestamps(self):
+        """Set anchor timestamps for absolute time tracking."""
+        self.anchor_sim_time = self.sim_time
+        self.anchor_real_time = self.real_time
+
+        # Also update the anchors used by the real time rate meter and peg
+        if self.rtr_peg is not None:
+            self.rtr_peg.last_event_time = self.anchor_real_time
+        if self.rtr_meter is not None:
+            self.rtr_meter.set_anchor_timestamps(self.anchor_real_time, self.anchor_sim_time)
+
     def sync_time(self):
         # Calculate target real time based on anchor
         sim_elapsed = self.sim_time - self.anchor_sim_time
@@ -331,6 +344,9 @@ class SimulationWorker:
         ])
 
     def main_loop(self):
+        # Initialize anchors here to avoid any gap between reset()
+        self.set_anchor_timestamps()
+
         # Main worker loop
         # Note that the horizon is interpreted as seconds of simulation time
         while not self.conf.stop_event.is_set() and not self.conf.done_event.is_set():
