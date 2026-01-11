@@ -1,5 +1,5 @@
 [project]
-name = "robosuite"
+name = "realtime-robosuite"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -43,7 +43,11 @@ dependencies = [
     "typing-extensions==4.14.0",
     "usd-core>=25.5.1",
     "zipp==3.22.0",
+    "tyro>=1.0.3",
 ]
+
+[project.scripts]
+demo = "robosuite.demos.demo_async_env:main"
 
 [dependency-groups]
 dev = [
@@ -53,7 +57,6 @@ dev = [
   "pytest>=8.4.2",
   "ruff>=0.14.7",
   "ty>=0.0.1a29",
-  "tyro>=1.0.3",
 ]
 
 [build-system]

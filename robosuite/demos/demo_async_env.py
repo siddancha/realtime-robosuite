@@ -12,7 +12,7 @@ import tyro
 import robosuite as suite
 
 
-def main(
+def run_demo(
     horizon: float = 10.0,
     seed: Optional[int] = None,
     real_time_rate: float = 1.0,
@@ -48,5 +48,8 @@ def main(
     env.stop()
 
 
+def main():
+    tyro.cli(run_demo)
+
 if __name__ == "__main__":
-    tyro.cli(main)
+    main()
