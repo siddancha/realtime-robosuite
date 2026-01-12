@@ -184,24 +184,23 @@ class SimulationWorker:
         self.is_action_new = True
 
         # Reset the MuJoCo environment
-        obs_data: OrderedDict = self.env.reset()
+        self.env.reset()
 
-        # Initialize viewer.
-        # The first call can be slow, so it is important to do this before setting
-        # the anchor timestamps.
+        # Warmup: take one simulation step to trigger any first-run JIT compilation
+        # (e.g., MuJoCo JIT on fresh installs)
+        self.take_sim_step()
+
+        # Initialize viewer: the first call can be slow.
         if self.conf.visualization_freq is not None:
             self.update_viewer()
-
-        # Create initial observation
-        observation = Observation(
-            data=obs_data,
-            time=self.sim_time,
-            action=self.latest_action.copy(),
-        )
 
         # Drain queues
         self.observation_queue.drain()
         self.control_queue.drain()
+
+        # Publish initial observation
+        obs = self.get_observations()
+        self.observation_queue.publish(obs)
 
         # Get simulation timestep
         assert self.env.model_timestep is not None
@@ -252,8 +251,6 @@ class SimulationWorker:
             self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.anchor_real_time)
         else:
             self.viz_peg = None
-
-        self.observation_queue.publish(observation)
 
     def handle_request(self, request: Request):
         assert isinstance(request, Request), f"Expected Request, got {type(request)}"
