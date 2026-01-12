@@ -60,11 +60,12 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.8.19"]
+build-backend = "uv_build"
 
-[tool.setuptools.packages.find]
-include = ["robosuite"]
+[tool.uv.build-backend]
+module-name = "robosuite"
+module-root = ""
 
 [tool.black]
 line-length = 120
