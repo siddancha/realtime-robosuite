@@ -1,6 +1,22 @@
 <h1 align="center">Realtime Robosuite</h1>
 <h3 align="center">Realtime simulation benchmarking via asynchronous <br>policy execution</i></h3>
 
+## Known Issues / TODOs
+
+### Low real-time rate causes incorrect visualization frequency
+
+When `target_real_time_rate` is very low (e.g., 0.01), the visualization does not update at the expected wall-clock frequency. This happens because the main loop runs multiple simulation steps at full CPU speed between sync points, then sleeps for a long time in `sync_time()`. Since `viz_peg` is based on wall-clock time but only checked after each loop iteration, and wall-clock time barely advances during the fast simulation steps, visualization updates effectively only occur after `sync_time()` sleeps.
+
+**Expected behavior**: Visualization should update at `visualization_freq` Hz in wall-clock time regardless of the real-time rate.
+
+**Current behavior**: Visualization updates are tied to the sync schedule, resulting in large jumps in displayed simulation time.
+
+**Fix**: When RTR < 1, instead of batching multiple sim steps and then sleeping, the sleep time should be distributed across individual sim steps so that wall-clock-based periodic events (`viz_peg`, `rtr_peg`) can fire at their intended frequency. This could be implemented by either:
+1. Calling `sync_time()` after every sim step when RTR < 1
+2. Having `sync_time()` break its sleep into smaller chunks and perform visualization updates during the sleep
+
+---
+
 ![gallery of_environments](docs/images/gallery.png)
 
 [**[Homepage]**](https://robosuite.ai/) &ensp; [**[White Paper]**](https://arxiv.org/abs/2009.12293) &ensp; [**[Documentations]**](https://robosuite.ai/docs/overview.html) &ensp; [**[ARISE Initiative]**](https://github.com/ARISE-Initiative)
