@@ -183,9 +183,18 @@ class SimulationWorker:
         self.latest_action = self.default_action
         self.is_action_new = True
 
-        # Reset environment and create initial observation
+        # Reset the MuJoCo environment
+        obs_data: OrderedDict = self.env.reset()
+
+        # Initialize viewer.
+        # The first call can be slow, so it is important to do this before setting
+        # the anchor timestamps.
+        if self.conf.visualization_freq is not None:
+            self.update_viewer()
+
+        # Create initial observation
         observation = Observation(
-            data=self.env.reset(),
+            data=obs_data,
             time=self.sim_time,
             action=self.latest_action.copy(),
         )
@@ -310,7 +319,7 @@ class SimulationWorker:
         if self.env.renderer == "mujoco" or self.env.renderer == "mjviewer":
             self.env.viewer.update()
 
-        # Add overlays to the visualizer
+    def update_viewer_overlays(self):
         observed_rtr = self.rtr_meter.rate
         self.env.viewer.viewer.set_texts([
             (None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "Async. simulation time", f"{self.sim_time:.3f}s"),
@@ -379,6 +388,7 @@ class SimulationWorker:
             # Update visualization.
             if self.viz_peg and self.viz_peg.is_ready(curr_real_time):
                 self.update_viewer()
+                self.update_viewer_overlays()
                 self.viz_peg.register_event(curr_real_time)
 
             # Check if simulation time horizon has been reached.
