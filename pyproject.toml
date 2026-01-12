@@ -81,3 +81,6 @@ extend_skip = [
     "robosuite/models/assets",
     "robosuite/controllers/config",
 ]
+
+[tool.ty.environment]
+extra-paths = ["typings"]
