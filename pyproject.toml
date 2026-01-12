@@ -1,5 +1,5 @@
 [project]
-name = "robosuite"
+name = "realtime-robosuite"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -31,7 +31,6 @@ dependencies = [
     "pygments==2.19.1",
     "pynput==1.8.1",
     "pyopengl==3.1.9",
-    "pytest==8.4.0",
     "python-xlib==0.33",
     "qpsolvers==4.7.1",
     "quadprog==0.1.13",
@@ -44,14 +43,29 @@ dependencies = [
     "typing-extensions==4.14.0",
     "usd-core>=25.5.1",
     "zipp==3.22.0",
+    "tyro>=1.0.3",
+]
+
+[project.scripts]
+demo = "robosuite.demos.demo_async_env:main"
+
+[dependency-groups]
+dev = [
+  "ipdb>=0.13.13",
+  "pre-commit>=4.3.0",
+  "pyright>=1.1.407",
+  "pytest>=8.4.2",
+  "ruff>=0.14.7",
+  "ty>=0.0.1a29",
 ]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.8.19"]
+build-backend = "uv_build"
 
-[tool.setuptools.packages.find]
-include = ["robosuite"]
+[tool.uv.build-backend]
+module-name = "robosuite"
+module-root = ""
 
 [tool.black]
 line-length = 120
@@ -68,3 +82,6 @@ extend_skip = [
     "robosuite/models/assets",
     "robosuite/controllers/config",
 ]
+
+[tool.ty.environment]
+extra-paths = ["typings"]

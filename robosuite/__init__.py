@@ -15,7 +15,7 @@ from robosuite.environments.manipulation.two_arm_handover import TwoArmHandover
 from robosuite.environments.manipulation.two_arm_transport import TwoArmTransport
 
 from robosuite.environments import ALL_ENVIRONMENTS
-from robosuite.environments.async_env import AsyncSimulation, ObservationStream, ActionStream, StepResult
+from robosuite.environments.async_env import AsyncSimulation, ObservationStream, ControlStream
 from robosuite.controllers import (
     ALL_PART_CONTROLLERS,
     load_part_controller_config,
@@ -44,7 +44,7 @@ except:
     )
 
 __version__ = "1.5.1"
-__logo__ = """
+__logo__ = r"""
       ;     /        ,--.
      ["]   ["]  ,<  |__**|
     /[_]\  [~]\/    |//  |

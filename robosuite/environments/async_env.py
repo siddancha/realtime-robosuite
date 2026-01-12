@@ -1,4 +1,6 @@
+from __future__ import annotations
 import logging
+import mujoco
 import multiprocessing as mp
 import queue
 import threading
@@ -6,31 +8,28 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from functools import cached_property, partial
-from multiprocessing.context import BaseContext
+from multiprocessing.context import SpawnContext
+from multiprocessing.queues import Queue as MPQueue
 from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
 import robosuite as suite
+from robosuite.utils.log_utils import ROBOSUITE_DEFAULT_LOGGER
 
 if TYPE_CHECKING:
+    import mujoco.viewer
     from robosuite.environments.base import MujocoEnv
-    from multiprocessing.queues import Queue
+    from robosuite.renderers.viewer import MjviewerRenderer
+    from multiprocessing.context import SpawnProcess
     from multiprocessing.synchronize import Event
 
-logger = logging.getLogger(__name__)
 
-
-@dataclass(frozen=True)
-class StepResult:
-    """
-    Container for data produced by a single control step of the simulation.
-    """
-    observation: OrderedDict[str, np.ndarray]
-    reward: float
-    done: bool
-    info: Dict[str, Any]
+@dataclass
+class Observation:
+    """Observation produced by the asynchronous simulation."""
+    data: OrderedDict
+    time: float
     action: np.ndarray
-    timestamp: float
 
 
 @dataclass(frozen=True)
@@ -46,154 +45,352 @@ class Response:
     error: Optional[str] = None
 
 
-def _default_action_from_env(env) -> np.ndarray:
-    low, _ = env.action_spec
-    low = np.asarray(low, dtype=np.float32)
-    return np.zeros_like(low, dtype=np.float32)
+class PeriodicEventGenerator:
+    def __init__(self, period: float | int, start_time: float | int = 0):
+        assert period > 0, "Period must be strictly positive."
+        self.period = period
+        self.last_event_time = start_time - period
+
+    def is_ready(self, timestamp: float | int) -> bool:
+        return timestamp >= self.last_event_time + self.period
+
+    def register_event(self, timestamp: float | int):
+        self.last_event_time = timestamp
 
 
-def _publish_step(queue_obj: "Queue", step: StepResult):
-    while True:
-        try:
-            queue_obj.put_nowait(step)
-            break
-        except queue.Full:
-            try:
-                queue_obj.get_nowait()
-            except queue.Empty:
-                break
+class RealTimeRateMeter:
+    """Estimates the real-time rate of a simulation over wall-clock time windows."""
+
+    def __init__(self, real_time: float, sim_time: float):
+        self._anchor_real_time = real_time
+        self._anchor_sim_time = sim_time
+        self.rate: float = 1.0
+
+    def update(self, real_time: float, sim_time: float):
+        """Update RTR estimate based on elapsed time since last update."""
+        real_elapsed = real_time - self._anchor_real_time
+        sim_elapsed = sim_time - self._anchor_sim_time
+
+        if real_elapsed > 0:
+            self.rate = sim_elapsed / real_elapsed
+
+        # Reset anchor timestamps at every update
+        self._anchor_real_time = real_time
+        self._anchor_sim_time = sim_time
 
 
-def _simulation_worker(
-    env_factory: Callable[[], "MujocoEnv"],
-    action_freq: float,
-    observation_freq: float,
-    stop_event: "Event",
-    started_event: "Event",
-    action_queue: "Queue",
-    observation_queue: "Queue",
-    request_queue: "Queue",
-    reply_queue: "Queue",
-):
-    env = env_factory()
+class Queue (MPQueue):
+    """
+    Multiprocessing queue that supports drop-oldest publish and draining the latest item.
+    """
 
-    try:
-        env.initialize_time(action_freq)
-    except Exception as exc:
-        logger.debug("initialize_time failed with %s. Continuing with env defaults.", exc)
-
-    default_action = _default_action_from_env(env)
-    latest_action = default_action.copy()
-    current_step: Optional[StepResult] = None
-    episode_done = False
-
-    def reset_env():
-        nonlocal latest_action, current_step
-        try:
-            env.initialize_time(action_freq)
-        except Exception as exc:
-            logger.debug("initialize_time during reset failed with %s", exc)
-        observation = env.reset()
-        latest_action = default_action.copy()
-        current_step = StepResult(
-            observation=observation,
-            reward=0.0,
-            done=False,
-            info={"reset": True},
-            action=latest_action.copy(),
-            timestamp=time.time(),
-        )
-        _publish_step(observation_queue, current_step)
-
-    def drain_actions():
-        nonlocal latest_action
+    def publish(self, item: Any):
+        """
+        Put an item into the queue, dropping the oldest element if the queue is full.
+        """
         while True:
             try:
-                candidate = action_queue.get_nowait()
-                latest_action = np.asarray(candidate, dtype=np.float32).copy()
-            except queue.Empty:
+                self.put_nowait(item)
                 break
+            except queue.Full:
+                try:
+                    self.get_nowait()
+                except queue.Empty:
+                    continue
 
-    reset_env()
-    started_event.set()
-
-    action_period = 1.0 / action_freq
-    observation_period = 1.0 / observation_freq
-    next_action_time = time.perf_counter()
-    next_observation_time = next_action_time
-
-    while not stop_event.is_set():
+    def drain(self) -> Any:
+        """
+        Drain all items from the queue and return the latest one.
+        """
+        latest: Optional[Any] = None
         while True:
             try:
-                request: Request = request_queue.get_nowait()
+                latest = self.get_nowait()
             except queue.Empty:
                 break
+        return latest
 
-            assert isinstance(request, Request), f"Expected Request, got {type(request)}"
-            command = request.command
 
-            if command == "reset":
-                reset_env()
-                episode_done = False
-                next_action_time = time.perf_counter()
-                next_observation_time = next_action_time
-                reply_queue.put(Response(command=command, payload=None))
-            elif command == "shutdown":
-                stop_event.set()
-                reply_queue.put(Response(command=command, payload=None))
-                break
-            elif command == "get_action_dim":
-                reply_queue.put(Response(command=command, payload=env.action_dim))
-            else:
-                raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
-        if stop_event.is_set():
-            break
+@dataclass
+class SimulationWorkerConf:
+    env_factory: Callable[[], MujocoEnv]
+    control_freq: float
+    observation_freq: float
+    visualization_freq: Optional[float]
+    real_time_rate_freq: float
+    target_real_time_rate: float
+    reward_freq: float
+    start_event: Event
+    stop_event: Event
+    done_event: Event
+    control_queue: Queue
+    observation_queue: Queue
+    request_queue: Queue
+    reply_queue: Queue
 
-        if episode_done:
-            stop_event.wait(timeout=0.01)
-            continue
+class SimulationWorker:
+    conf: SimulationWorkerConf
+    env: MujocoEnv
+    sync_peg: PeriodicEventGenerator
+    obs_peg: PeriodicEventGenerator
+    reward_peg: PeriodicEventGenerator
+    viz_peg: Optional[PeriodicEventGenerator]
+    rtr_peg: PeriodicEventGenerator
+    rtr_meter: RealTimeRateMeter
+    latest_action: np.ndarray
+    is_action_new: bool
+    anchor_sim_time: float
+    anchor_real_time: float
+    sim_step_counter: int
 
-        now = time.perf_counter()
-        sleep_time = next_action_time - now
-        if sleep_time > 0:
-            if stop_event.wait(timeout=min(sleep_time, 0.002)):
-                break
-            continue
+    def __init__(self, conf: SimulationWorkerConf):
+        self.conf = conf
 
-        drain_actions()
-        observation, reward, done, info = env.step(latest_action.copy())
-        timestamp = time.time()
-        current_step = StepResult(
-            observation=observation,
-            reward=reward,
-            done=done,
-            info=info,
-            action=latest_action.copy(),
-            timestamp=timestamp,
+        # Instantiate environment in the worker process.
+        self.env = self.conf.env_factory()
+
+    @property
+    def default_action(self) -> np.ndarray:
+        return np.zeros_like(self.env.action_spec[0], dtype=np.float32)
+
+    @property
+    def sim_time(self) -> float:
+        return float(self.env.sim.data.time)
+
+    def real_time(self) -> float:
+        return time.perf_counter()
+
+    @property
+    def observation_queue(self) -> Queue:
+        return self.conf.observation_queue
+    
+    @property
+    def control_queue(self) -> Queue:
+        return self.conf.control_queue
+    
+    @property
+    def request_queue(self) -> Queue:
+        return self.conf.request_queue
+    
+    @property
+    def reply_queue(self) -> Queue:
+        return self.conf.reply_queue
+    
+    def reset(self):
+        self.env.initialize_time(self.conf.control_freq)
+
+        # Reset latest action to default
+        self.latest_action = self.default_action
+        self.is_action_new = True
+
+        # Reset environment and create initial observation
+        observation = Observation(
+            data=self.env.reset(),
+            time=self.sim_time,
+            action=self.latest_action.copy(),
         )
 
-        now = time.perf_counter()
-        should_publish = now >= next_observation_time or done
-        if should_publish:
-            _publish_step(observation_queue, current_step)
-            while next_observation_time <= now:
-                next_observation_time += observation_period
+        # Drain queues
+        self.observation_queue.drain()
+        self.control_queue.drain()
 
-        next_action_time += action_period
-        if next_action_time <= now:
-            next_action_time = now + action_period
+        # Get simulation timestep
+        assert self.env.model_timestep is not None
+        assert self.env.model_timestep == self.env.sim.model.opt.timestep
+        sim_timestep = self.env.model_timestep
 
-        if done:
-            episode_done = True
-            if not should_publish:
-                _publish_step(observation_queue, current_step)
-            next_action_time = time.perf_counter()
-            next_observation_time = next_action_time
+        # Helper to snap frequency to nearest multiple of sim timestep and compute period in ticks
+        def snap_frequency_to_sim_timestep(freq: float, name: str) -> int:
+            period_seconds = 1.0 / freq
+            period_ticks = round(period_seconds / sim_timestep)
+            snapped_freq = 1.0 / (period_ticks * sim_timestep)
+            if snapped_freq != freq:
+                ROBOSUITE_DEFAULT_LOGGER.warning(
+                    f"{name.capitalize()} frequency {freq:.2f} Hz is not a perfect multiple of "
+                    f"simulation timestep ({sim_timestep}s). Snapping to {snapped_freq:.2f} Hz."
+                )
+            return period_ticks
 
-    try:
-        env.close()
-    except Exception:
-        pass
+        # Initialize sim step counter
+        self.sim_step_counter = 0
+
+        # Create periodic event generators with tick-based periods
+        self.sync_peg = PeriodicEventGenerator(
+            period=snap_frequency_to_sim_timestep(self.conf.control_freq, "control"),
+            start_time=0,
+        )
+        self.obs_peg = PeriodicEventGenerator(
+            period=snap_frequency_to_sim_timestep(self.conf.observation_freq, "observation"),
+            start_time=0,
+        )
+        self.reward_peg = PeriodicEventGenerator(
+            period=snap_frequency_to_sim_timestep(self.conf.reward_freq, "reward"),
+            start_time=0,
+        )
+
+        # Initialize time anchors for absolute time tracking (used by sync_time)
+        self.anchor_sim_time = self.sim_time
+        self.anchor_real_time = self.real_time()
+
+        # RTR meter uses wall-clock time (float)
+        rtr_period = 1.0 / self.conf.real_time_rate_freq
+        self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=self.anchor_real_time)
+        self.rtr_meter = RealTimeRateMeter(self.anchor_real_time, self.anchor_sim_time)
+
+        # Visualization uses wall-clock time (float), not ticks
+        if self.conf.visualization_freq is not None:
+            viz_period = 1.0 / self.conf.visualization_freq
+            self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.anchor_real_time)
+        else:
+            self.viz_peg = None
+
+        self.observation_queue.publish(observation)
+
+    def handle_request(self, request: Request):
+        assert isinstance(request, Request), f"Expected Request, got {type(request)}"
+        command = request.command
+
+        if command == "reset":
+            self.reset()
+            self.reply_queue.put(Response(command=command, payload=None))
+        elif command == "shutdown":
+            self.conf.stop_event.set()
+            self.reply_queue.put(Response(command=command, payload=None))
+        elif command == "get_action_dim":
+            self.reply_queue.put(Response(command=command, payload=self.env.action_dim))
+        else:
+            raise ValueError(f"Unknown command received by simulation worker: {request.command!r}")
+
+    def compute_reward(self) -> float:
+        action = self.latest_action.copy()
+        reward, _, _ = self.env._post_action(action)
+        return reward
+
+    def get_observations(self) -> Observation:
+        obs_data = self.env.viewer._get_observations() if self.env.viewer_get_obs else self.env._get_observations()
+        return Observation(
+            data=obs_data,
+            time=self.sim_time,
+            action=self.latest_action.copy(),
+        )
+
+    def take_sim_step(self):
+        action = self.latest_action.copy()
+
+        # The main MuJoCo step
+        if self.env.lite_physics:
+            self.env.sim.step1()
+        else:
+            self.env.sim.forward()
+        self.env._pre_action(action, policy_step=self.is_action_new)
+        if self.env.lite_physics:
+            self.env.sim.step2()
+        else:
+            self.env.sim.step()
+        self.env._update_observables()
+
+    def sync_time(self):
+        # Calculate target real time based on anchor
+        sim_elapsed = self.sim_time - self.anchor_sim_time
+        real_elapsed = self.real_time() - self.anchor_real_time
+        target_real_elapsed = sim_elapsed / self.conf.target_real_time_rate
+
+        # Sleep until target time
+        if target_real_elapsed > real_elapsed:
+            time.sleep(target_real_elapsed - real_elapsed)
+
+    def update_viewer(self):
+        if not self.env.renderer:
+            return
+
+        if self.env.renderer == "mjviewer" and self.env.viewer is None:
+            # need to launch again after it was destroyed
+            self.env.initialize_renderer()
+
+        if self.env.renderer == "mujoco" or self.env.renderer == "mjviewer":
+            self.env.viewer.update()
+
+        # Add overlays to the visualizer
+        observed_rtr = self.rtr_meter.rate
+        self.env.viewer.viewer.set_texts([
+            (None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "Async. simulation time", f"{self.sim_time:.3f}s"),
+            (None, mujoco.mjtGridPos.mjGRID_TOPRIGHT, "Real-time rate", f"{observed_rtr:.3f}")
+        ])
+
+    def main_loop(self):
+        # Reset the environment
+        self.reset()
+
+        # Signal to the parent process that initialization is complete.
+        self.conf.start_event.set()
+
+        # Main worker loop
+        # Note that the horizon is interpreted as seconds of simulation time
+        while not self.conf.stop_event.is_set() and not self.conf.done_event.is_set():
+            # Check for requests from the parent process.
+            try:
+                # Requests are blocking until there is a reply on thr reply queue.
+                # So there will only be one request at a time.
+                request = self.conf.request_queue.get_nowait()
+
+                # If a request is succesfully received, handle it.
+                self.handle_request(request)
+            except queue.Empty:
+                pass
+
+            # Update the latest action from the control queue.
+            if (drained_action := self.control_queue.drain()) is not None:
+                self.latest_action = np.array(drained_action, dtype=np.float32)
+                self.is_action_new = True
+
+            # Take a step in the environment.
+            self.take_sim_step()
+            self.sim_step_counter += 1
+            self.is_action_new = False
+
+            # Synchronize sim time with real time if either an observation needs to be produced now
+            # or if its time now to periodically sync them.
+            if self.obs_peg.is_ready(self.sim_step_counter) or self.sync_peg.is_ready(self.sim_step_counter):
+                self.sync_time()
+                # We register the sync event every time we call sync_time() even if it wasn't triggered
+                # by the sync_peg. This resets the sync interval, but still maintains the guarantee that
+                # control will be executed in simulation with a delay of no more than 1/control_freq.
+                self.sync_peg.register_event(self.sim_step_counter)
+
+            # Publish observation.
+            if self.obs_peg.is_ready(self.sim_step_counter):
+                observations = self.get_observations()
+                self.observation_queue.publish(observations)
+                self.obs_peg.register_event(self.sim_step_counter)
+
+            # Publish reward.
+            if self.reward_peg.is_ready(self.sim_step_counter):
+                reward = self.compute_reward()
+                self.reward_peg.register_event(self.sim_step_counter)
+
+            # Get current real time.
+            curr_real_time = self.real_time()
+
+            # Update real-time rate meter.
+            if self.viz_peg and self.rtr_peg.is_ready(curr_real_time):
+                self.rtr_meter.update(curr_real_time, self.sim_time)
+                self.rtr_peg.register_event(curr_real_time)
+
+            # Update visualization.
+            if self.viz_peg and self.viz_peg.is_ready(curr_real_time):
+                self.update_viewer()
+                self.viz_peg.register_event(curr_real_time)
+
+            # Check if simulation time horizon has been reached.
+            if self.sim_time >= self.env.horizon:
+                self.conf.done_event.set()
+
+        self.env.close()
+
+    @staticmethod
+    def runner(conf: SimulationWorkerConf):
+        worker = SimulationWorker(conf)
+        worker.main_loop()
 
 
 class ObservationStream:
@@ -201,14 +398,14 @@ class ObservationStream:
     Interface for consuming observations produced by the asynchronous simulation process.
     """
 
-    def __init__(self, queue_obj: "Queue", history: int = 1):
+    def __init__(self, queue_obj: Queue, history: int = 1):
         if history <= 0:
             raise ValueError("ObservationStream history must be a positive integer.")
         self._queue = queue_obj
         self._history = deque(maxlen=history)
         self._lock = threading.Lock()
 
-    def _drain(self, block: bool, timeout: Optional[float]) -> Optional[StepResult]:
+    def _drain(self, block: bool, timeout: Optional[float]) -> Optional[Observation]:
         first = True
         while True:
             try:
@@ -228,35 +425,35 @@ class ObservationStream:
         with self._lock:
             return self._history[-1] if self._history else None
 
-    def latest(self) -> Optional[StepResult]:
+    def latest(self) -> Optional[Observation]:
         """
-        Returns the latest step without blocking.
+        Returns the latest observation without blocking.
         If the queue is empty, returns None.
         """
         return self._drain(block=False, timeout=None)
 
-    def get(self, timeout: Optional[float] = None) -> StepResult:
+    def get(self, timeout: Optional[float] = None) -> Observation:
         """
-        Returns the latest step with blocking.
-        If the queue is empty, waits for the step to be available.
+        Returns the latest observation with blocking.
+        If the queue is empty, waits for the observation to be available.
         """
         result = self._drain(block=True, timeout=timeout)
         if result is None:
             raise TimeoutError("Timed out while waiting for observation.")
         return result
 
-    def snapshot(self) -> Sequence[StepResult]:
+    def snapshot(self) -> Sequence[Observation]:
         self._drain(block=False, timeout=None)
         with self._lock:
             return tuple(self._history)
 
 
-class ActionStream:
+class ControlStream:
     """
-    Interface for pushing actions to the asynchronous simulation process.
+    Interface for pushing actions (controls) to the asynchronous simulation process.
     """
 
-    def __init__(self, queue_obj: "Queue"):
+    def __init__(self, queue_obj: Queue):
         self._queue = queue_obj
         self._lock = threading.Lock()
         self._latest: Optional[np.ndarray] = None
@@ -266,16 +463,8 @@ class ActionStream:
         action_array = np.asarray(action, dtype=np.float32).copy()
         with self._lock:
             self._latest = action_array
-            self._latest_timestamp = time.time()
-        while True:
-            try:
-                self._queue.put_nowait(action_array)
-                break
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
+            self._latest_timestamp = time.perf_counter()
+        self._queue.publish(action_array)
 
     def latest(self) -> Optional[np.ndarray]:
         with self._lock:
@@ -293,63 +482,91 @@ class AsyncSimulation:
     Runs a robosuite environment in a separate process at approximately real-time rate.
     The parent process (typically running the policy) interacts with the simulation through
     action and observation streams.
+
+    The control frequency is defined as follows: the control period (= 1.0 / control_freq) is the
+    maximum time interval between sending a new control command and when that control command will
+    be executed in the simulation.
+    • Functionally, it is the (minimum) rate at which the simulation time is synced with real time.
+    • A higher control frequency means that the delay between sending a new control command and its
+      execution in the simulation is smaller, but at the cost of more frequent synchronization with
+      real time with smaller sleep intervals.
+
+    Args:
+        env_factory (Callable[[], MujocoEnv]): Factory function that creates a new environment instance.
+        control_freq (float): The frequency of the control stream in Hz.
+        observation_freq (float): The frequency of the observation stream in Hz.
+        visualization_freq (Optional[float]): The frequency of the visualization stream in Hz.
+        target_real_time_rate (float): The target real-time rate of the simulation.
+        reward_freq (float): The frequency of the reward stream in Hz.
+        history (int): The number of steps to store in the observation stream.
+        ctx (Optional[SpawnContext]): The multiprocessing context to use.
     """
 
     def __init__(
         self,
-        env_factory: Callable[[], "MujocoEnv"],
-        action_freq: float = 50.0,
+        env_factory: Callable[[], MujocoEnv],
+        control_freq: float = 50.0,
         observation_freq: float = 30.0,
+        visualization_freq: Optional[float] = 30.0,
+        real_time_rate_freq: float = 5.0,
+        target_real_time_rate: float = 1.0,
+        reward_freq: float = 10.0,
         history: int = 1,
-        ctx: Optional[BaseContext] = None,
+        ctx: Optional[SpawnContext] = None,
     ):
-        if action_freq <= 0:
-            raise ValueError("action_freq must be > 0.")
+        if control_freq <= 0:
+            raise ValueError("control_freq must be > 0.")
         if observation_freq <= 0:
             raise ValueError("observation_freq must be > 0.")
 
-        self.env_factory = env_factory
-        self.action_freq = float(action_freq)
-        self.observation_freq = float(observation_freq)
         self._ctx = ctx or mp.get_context("spawn")
+        self._start_event = self._ctx.Event()
         self._stop_event = self._ctx.Event()
-        self._started_event = self._ctx.Event()
-        self._action_queue = self._ctx.Queue(maxsize=8)
-        self._observation_queue = self._ctx.Queue(maxsize=max(1, history))
-        self._request_queue = self._ctx.Queue(maxsize=1)
-        self._reply_queue = self._ctx.Queue(maxsize=1)
-        self._process: Optional[mp.Process] = None
+        self._done_event = self._ctx.Event()
+        self._control_queue = Queue(maxsize=8, ctx=self._ctx)
+        self._observation_queue = Queue(maxsize=max(1, history), ctx=self._ctx)
+        self._request_queue = Queue(maxsize=1, ctx=self._ctx)
+        self._reply_queue = Queue(maxsize=1, ctx=self._ctx)
+        self._process: Optional[SpawnProcess] = None
 
-        self.action_stream = ActionStream(self._action_queue)
+        self.control_stream = ControlStream(self._control_queue)
         self.observation_stream = ObservationStream(self._observation_queue, history=history)
+
+        self.worker_conf = SimulationWorkerConf(
+            env_factory,
+            control_freq,
+            observation_freq,
+            visualization_freq,
+            real_time_rate_freq,
+            target_real_time_rate,
+            reward_freq,
+            self._start_event,
+            self._stop_event,
+            self._done_event,
+            self._control_queue,
+            self._observation_queue,
+            self._request_queue,
+            self._reply_queue
+        )
 
     def start(self, wait: bool = True):
         if self._process and self._process.is_alive():
             raise RuntimeError("AsyncSimulation already running.")
 
+        self._start_event.clear()
         self._stop_event.clear()
-        self._started_event.clear()
+        self._done_event.clear()
 
         self._process = self._ctx.Process(
-            target=_simulation_worker,
+            target=SimulationWorker.runner,
             name="AsyncSimulationProcess",
             daemon=True,
-            args=(
-                self.env_factory,
-                self.action_freq,
-                self.observation_freq,
-                self._stop_event,
-                self._started_event,
-                self._action_queue,
-                self._observation_queue,
-                self._request_queue,
-                self._reply_queue,
-            ),
+            args=(self.worker_conf,),
         )
         self._process.start()
 
         if wait:
-            started = self._started_event.wait(timeout=10.0)
+            started = self._start_event.wait(timeout=10.0)
             if not started:
                 self.stop(wait=False)
                 raise TimeoutError("AsyncSimulation failed to start within 10 seconds.")
@@ -370,7 +587,7 @@ class AsyncSimulation:
             self._process.terminate()
             self._process.join(timeout=5.0)
         self._process = None
-        self._started_event.clear()
+        self._start_event.clear()
 
     def reset(self):
         if not self.is_running():
@@ -389,7 +606,7 @@ class AsyncSimulation:
         request = Request(command=command, payload=payload)
         self._request_queue.put(request)
         try:
-            response = self._reply_queue.get(timeout=timeout)
+            response = self._reply_queue.get(block=True, timeout=timeout)
         except queue.Empty as exc:
             raise RuntimeError(f"Timed out waiting for response to command {command!r}.") from exc
 
@@ -417,10 +634,13 @@ class AsyncSimulation:
         result = self._send_request("get_action_dim", timeout=2.0)
         return int(result)
 
+    def done(self) -> bool:
+        return self._done_event.is_set()
+
     def is_running(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
-    def latest_step(self) -> Optional[StepResult]:
+    def latest_observation(self) -> Optional[Observation]:
         return self.observation_stream.latest()
 
     def __enter__(self):
@@ -434,26 +654,42 @@ class AsyncSimulation:
 def make_async(
     env_name: str,
     *args,
-    action_freq: float = 50.0,
+    control_freq: float = 50.0,
     observation_freq: float = 30.0,
+    viz_freq: Optional[float] = 30.0,
+    real_time_rate_freq: float = 5.0,
+    target_real_time_rate: float = 1.0,
     history: int = 1,
     **kwargs,
 ) -> AsyncSimulation:
     """
-    Instantiates an asynchronous simluation of a robosuite environment.
+    Instantiates an asynchronous simulation of a robosuite environment.
     Args:
         env_name (str): Name of the robosuite environment to initialize
         *args: Additional arguments to pass to the specific environment class initializer
-        action_freq (float): The frequency of the action stream in Hz.
+        control_freq (float): The frequency of the control stream in Hz.
         observation_freq (float): The frequency of the observation stream in Hz.
+        viz_freq (Optional[float]): The frequency of the visualization stream in Hz.
+        real_time_rate_freq (float): The frequency of the real-time rate updates in Hz.
+        target_real_time_rate (float): The target real-time rate of the simulation.
         history (int): The number of steps to store in the observation stream.
         **kwargs: Additional arguments to pass to the specific environment class initializer
     Returns:
         AsyncSimulation: Asynchronous simulation of the robosuite environment.
     """
     return AsyncSimulation(
-        env_factory = partial["MujocoEnv"](suite.make, env_name, *args, **kwargs),
-        action_freq = action_freq,
+        env_factory = partial(
+            suite.make,
+            env_name,
+            *args,
+            control_freq = control_freq,
+            **kwargs,
+            ignore_done = True,  # always ignore done
+        ),
+        control_freq = control_freq,
         observation_freq = observation_freq,
+        visualization_freq = viz_freq,
+        real_time_rate_freq = real_time_rate_freq,
+        target_real_time_rate = target_real_time_rate,
         history = history,
     )
