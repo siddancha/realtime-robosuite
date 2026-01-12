@@ -46,7 +46,7 @@ class Response:
 
 
 class PeriodicEventGenerator:
-    def __init__(self, period: float | int, start_time: float | int = 0):
+    def __init__(self, period: float | int, start_time: float | int):
         assert period > 0, "Period must be strictly positive."
         self.period = period
         self.last_event_time = start_time - period
@@ -186,6 +186,9 @@ class SimulationWorker:
         # Reset the MuJoCo environment
         self.env.reset()
 
+        # Initialize sim step counter
+        self.sim_step_counter = 0
+
         # Warmup: take one simulation step to trigger any first-run JIT compilation
         # (e.g., MuJoCo JIT on fresh installs)
         self.take_sim_step()
@@ -219,21 +222,18 @@ class SimulationWorker:
                 )
             return period_ticks
 
-        # Initialize sim step counter
-        self.sim_step_counter = 0
-
         # Create periodic event generators with tick-based periods
         self.sync_peg = PeriodicEventGenerator(
             period=snap_frequency_to_sim_timestep(self.conf.control_freq, "control"),
-            start_time=0,
+            start_time=self.sim_step_counter,
         )
         self.obs_peg = PeriodicEventGenerator(
             period=snap_frequency_to_sim_timestep(self.conf.observation_freq, "observation"),
-            start_time=0,
+            start_time=self.sim_step_counter,
         )
         self.reward_peg = PeriodicEventGenerator(
             period=snap_frequency_to_sim_timestep(self.conf.reward_freq, "reward"),
-            start_time=0,
+            start_time=self.sim_step_counter,
         )
 
         # Initialize time anchors for absolute time tracking (used by sync_time)
@@ -242,13 +242,19 @@ class SimulationWorker:
 
         # RTR meter uses wall-clock time (float)
         rtr_period = 1.0 / self.conf.real_time_rate_freq
-        self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=self.anchor_real_time)
+        self.rtr_peg = PeriodicEventGenerator(
+            period=rtr_period,
+            start_time=self.anchor_real_time,
+        )
         self.rtr_meter = RealTimeRateMeter(self.anchor_real_time, self.anchor_sim_time)
 
         # Visualization uses wall-clock time (float), not ticks
         if self.conf.visualization_freq is not None:
             viz_period = 1.0 / self.conf.visualization_freq
-            self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.anchor_real_time)
+            self.viz_peg = PeriodicEventGenerator(
+                period=viz_period,
+                start_time=self.anchor_real_time,
+            )
         else:
             self.viz_peg = None
 
@@ -294,6 +300,9 @@ class SimulationWorker:
         else:
             self.env.sim.step()
         self.env._update_observables()
+
+        self.sim_step_counter += 1
+        self.is_action_new = False
 
     def sync_time(self):
         # Calculate target real time based on anchor
@@ -351,8 +360,6 @@ class SimulationWorker:
 
             # Take a step in the environment.
             self.take_sim_step()
-            self.sim_step_counter += 1
-            self.is_action_new = False
 
             # Synchronize sim time with real time if either an observation needs to be produced now
             # or if its time now to periodically sync them.
