@@ -570,7 +570,7 @@ class AsyncSimulation:
             self._reply_queue
         )
 
-    def start(self, wait: bool = True):
+    def start(self):
         if self._process and self._process.is_alive():
             raise RuntimeError("AsyncSimulation already running.")
 
@@ -586,11 +586,11 @@ class AsyncSimulation:
         )
         self._process.start()
 
-        if wait:
-            started = self._start_event.wait(timeout=10.0)
-            if not started:
-                self.stop(wait=False)
-                raise TimeoutError("AsyncSimulation failed to start within 10 seconds.")
+        # Wait for the simulation to start
+        started = self._start_event.wait(timeout=10.0)
+        if not started:
+            self.stop(wait=False)
+            raise TimeoutError("AsyncSimulation failed to start within 10 seconds.")
 
     def stop(self, wait: bool = True):
         if self._process is None:
