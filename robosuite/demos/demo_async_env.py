@@ -15,7 +15,7 @@ import robosuite as suite
 
 
 def run_demo(
-    horizon: float = 10.0,
+    horizon: float = 100.0,
     seed: Optional[int] = None,
     real_time_rate: float = 1.0,
 ) -> None:
