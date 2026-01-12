@@ -1,5 +1,7 @@
 """
 Quick demo script that samples random actions in the CircleDrawing environment and renders the result.
+
+uvx --from git+https://github.com/siddancha/robosuite demo --real-time-rate 1.0
 """
 
 from __future__ import annotations

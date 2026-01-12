@@ -149,12 +149,6 @@ class SimulationWorker:
         # Instantiate environment in the worker process.
         self.env = self.conf.env_factory()
 
-        # Reset the environment
-        self.reset()
-
-        # Signal to the parent process that initialization is complete.
-        self.conf.start_event.set()
-
     @property
     def default_action(self) -> np.ndarray:
         return np.zeros_like(self.env.action_spec[0], dtype=np.float32)
@@ -234,18 +228,23 @@ class SimulationWorker:
             start_time=0,
         )
 
+        # Initialize time anchors for absolute time tracking (used by sync_time)
+        self.anchor_sim_time = self.sim_time
+        self.anchor_real_time = self.real_time()
+
+        # RTR meter uses wall-clock time (float)
+        rtr_period = 1.0 / self.conf.real_time_rate_freq
+        self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=self.anchor_real_time)
+        self.rtr_meter = RealTimeRateMeter(self.anchor_real_time, self.anchor_sim_time)
+
         # Visualization uses wall-clock time (float), not ticks
         if self.conf.visualization_freq is not None:
             viz_period = 1.0 / self.conf.visualization_freq
-            self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.real_time())
+            self.viz_peg = PeriodicEventGenerator(period=viz_period, start_time=self.anchor_real_time)
         else:
             self.viz_peg = None
 
         self.observation_queue.publish(observation)
-
-        # Initialize time anchors for absolute time tracking (used by sync_time)
-        # Also create RTR meter and peg
-        self.set_anchor_timestamps()
 
     def handle_request(self, request: Request):
         assert isinstance(request, Request), f"Expected Request, got {type(request)}"
@@ -290,19 +289,6 @@ class SimulationWorker:
             self.env.sim.step()
         self.env._update_observables()
 
-    def set_anchor_timestamps(self):
-        """
-        Set anchor timestamps for absolute time tracking.
-        Also initializes the RTR meter and peg to the same anchors.
-        """
-        self.anchor_sim_time = self.sim_time
-        self.anchor_real_time = self.real_time()
-
-        # RTR meter uses wall-clock time (float), only if visualization is enabled
-        rtr_period = 1.0 / self.conf.real_time_rate_freq
-        self.rtr_peg = PeriodicEventGenerator(period=rtr_period, start_time=self.anchor_real_time)
-        self.rtr_meter = RealTimeRateMeter(self.anchor_real_time, self.anchor_sim_time)
-
     def sync_time(self):
         # Calculate target real time based on anchor
         sim_elapsed = self.sim_time - self.anchor_sim_time
@@ -332,8 +318,11 @@ class SimulationWorker:
         ])
 
     def main_loop(self):
-        # Initialize anchors here to avoid any gap between reset()
-        self.set_anchor_timestamps()
+        # Reset the environment
+        self.reset()
+
+        # Signal to the parent process that initialization is complete.
+        self.conf.start_event.set()
 
         # Main worker loop
         # Note that the horizon is interpreted as seconds of simulation time
