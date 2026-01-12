@@ -49,7 +49,7 @@ class PeriodicEventGenerator:
     def __init__(self, period: float | int, start_time: float | int):
         assert period > 0, "Period must be strictly positive."
         self.period = period
-        self.last_event_time = start_time - period
+        self.last_event_time = start_time
 
     def is_ready(self, timestamp: float | int) -> bool:
         return timestamp >= self.last_event_time + self.period
@@ -177,11 +177,16 @@ class SimulationWorker:
         return self.conf.reply_queue
     
     def reset(self):
+        # Initialize time constants used for simulation
         self.env.initialize_time(self.conf.control_freq)
 
         # Reset latest action to default
         self.latest_action = self.default_action
         self.is_action_new = True
+
+        # Drain queues
+        self.observation_queue.drain()
+        self.control_queue.drain()
 
         # Reset the MuJoCo environment
         self.env.reset()
@@ -196,14 +201,6 @@ class SimulationWorker:
         # Initialize viewer: the first call can be slow.
         if self.conf.visualization_freq is not None:
             self.update_viewer()
-
-        # Drain queues
-        self.observation_queue.drain()
-        self.control_queue.drain()
-
-        # Publish initial observation
-        obs = self.get_observations()
-        self.observation_queue.publish(obs)
 
         # Get simulation timestep
         assert self.env.model_timestep is not None
@@ -222,39 +219,49 @@ class SimulationWorker:
                 )
             return period_ticks
 
-        # Create periodic event generators with tick-based periods
-        self.sync_peg = PeriodicEventGenerator(
-            period=snap_frequency_to_sim_timestep(self.conf.control_freq, "control"),
-            start_time=self.sim_step_counter,
-        )
+        # Simulation tick PEG to publish observations
         self.obs_peg = PeriodicEventGenerator(
             period=snap_frequency_to_sim_timestep(self.conf.observation_freq, "observation"),
             start_time=self.sim_step_counter,
         )
+        # Publish initial observation
+        obs = self.get_observations()
+        self.observation_queue.publish(obs)
+
+        # Simulation tick PEG to publish rewards
         self.reward_peg = PeriodicEventGenerator(
             period=snap_frequency_to_sim_timestep(self.conf.reward_freq, "reward"),
             start_time=self.sim_step_counter,
         )
 
+        # Simulation tick PEG to sync simulation time with real time
+        self.sync_peg = PeriodicEventGenerator(
+            period=snap_frequency_to_sim_timestep(self.conf.control_freq, "control"),
+            start_time=self.sim_step_counter,
+        )
         # Initialize time anchors for absolute time tracking (used by sync_time)
+        # Simulation time and real time are synced at initialization.
         self.anchor_sim_time = self.sim_time
         self.anchor_real_time = self.real_time()
 
-        # RTR meter uses wall-clock time (float)
+        # Wall-clock PEG for periodically invoking the RTR meter
         rtr_period = 1.0 / self.conf.real_time_rate_freq
         self.rtr_peg = PeriodicEventGenerator(
             period=rtr_period,
             start_time=self.anchor_real_time,
         )
+        # Initialize RTR meter by creating it; computing RTR needs elapsed time anyway.
         self.rtr_meter = RealTimeRateMeter(self.anchor_real_time, self.anchor_sim_time)
 
-        # Visualization uses wall-clock time (float), not ticks
+        # Wall-clock PEG for visualization
         if self.conf.visualization_freq is not None:
             viz_period = 1.0 / self.conf.visualization_freq
             self.viz_peg = PeriodicEventGenerator(
                 period=viz_period,
                 start_time=self.anchor_real_time,
             )
+            # Viewer has already been initialized; this was done before setting anchor timestamps
+            # because the first call to update_viewer() can be slow.
         else:
             self.viz_peg = None
 
